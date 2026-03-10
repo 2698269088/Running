@@ -9,19 +9,22 @@ import xin.bbtt.mcbot.Server;
 import xin.bbtt.movements.WalkMovement;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 public class MovementAdapter {
     private static MovementAdapter instance;
     private static final Logger logger = LoggerFactory.getLogger("RunningMovementAdapterSystem");
+    
+    private final StepMovementController stepController;
 
     private MovementAdapter() {
-        // 不再需要存储MovementSync实例，直接使用MovementSync.Instance
-        // 检查MovementSync插件是否加载
+        this.stepController = new StepMovementController();
+        // 检查 MovementSync 插件是否加载
         if (!Bot.Instance.getPluginManager().isPluginLoaded("MovementSync")) {
             throw new IllegalStateException("MovementSync plugin is not loaded!");
         }
         
-        // 验证MovementSync.Instance是否存在
+        // 验证 MovementSync.Instance 是否存在
         if (MovementSync.Instance == null) {
             throw new IllegalStateException("MovementSync.Instance is null!");
         }
@@ -56,15 +59,17 @@ public class MovementAdapter {
     }
     
     public CompletableFuture<Void> moveTo(Vector3d target) {
-        return CompletableFuture.runAsync(() -> {
-            if (!isAvailable()) {
-                throw new IllegalStateException("Movement system is not available");
+        if (!isAvailable()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Movement system is not available"));
+        }
+        
+        // 使用新的 StepMovementController
+        return stepController.moveTo(target).thenAccept(success -> {
+            if (success) {
+                logger.info("MovementAdapter: 移动成功完成");
+            } else {
+                logger.warn("MovementAdapter: 移动失败");
             }
-            
-            MovementSync.Instance.getMovementController().addMovement(new WalkMovement(
-                target.sub(MovementSync.Instance.position.get()).normalize().mul(0.2159), 
-                1000L
-            ));
         });
     }
     
@@ -96,8 +101,6 @@ public class MovementAdapter {
         
         return new Vector3d(MovementSync.Instance.position.get());
     }
-    
-    // 移除了syncPositionIfNeeded方法，因为我们现在直接使用MovementSync.Instance
     
     public Vector3d getHeadPosition() {
         if (!isAvailable()) {

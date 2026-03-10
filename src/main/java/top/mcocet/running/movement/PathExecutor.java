@@ -10,6 +10,7 @@ import top.mcocet.running.pathfinding.goals.CoordinateGoal;
 import top.mcocet.running.pathfinding.goals.Goal;
 import top.mcocet.running.pathfinding.utils.Path;
 import top.mcocet.running.pathfinding.utils.PathQualityAssessor;
+import xin.bbtt.MovementSync;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +22,15 @@ public class PathExecutor {
     private static PathExecutor instance;
 
     private static final Logger logger = LoggerFactory.getLogger("RunningPathExecutorSystem");
+    
+    // 最大偏离距离（格）
+    private static final double MAX_DIST_FROM_PATH = 5.0;
+    
+    //  ticks 偏离阈值（参考 Baritone 的设计）
+    private static final double MAX_TICKS_AWAY = 200;
+    
+    // 最大重试次数
+    private static final int MAX_RETRIES = 3;
 
     @Getter
     private volatile Path currentPath;
@@ -29,6 +39,7 @@ public class PathExecutor {
     private final AtomicBoolean isExecuting = new AtomicBoolean(false);
     private final AtomicBoolean shouldStop = new AtomicBoolean(false);
     private final MovementAdapter movementAdapter;
+    private int retryCount = 0;  // 当前路径点的重试次数
     
     private PathExecutor() {
         this.movementAdapter = MovementAdapter.getInstance();
@@ -122,12 +133,12 @@ public class PathExecutor {
         if (path == null || path.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        
+                
         // 限制路径长度，避免执行过长的路径
         final int MAX_PATH_LENGTH = 500; // 降低最大节点数限制
         Path trimmedPath;
         if (path.size() > MAX_PATH_LENGTH) {
-            // 截取前MAX_PATH_LENGTH个节点
+            // 截取前 MAX_PATH_LENGTH 个节点
             List<PathNode> trimmedNodes = new ArrayList<>();
             for (int i = 0; i < MAX_PATH_LENGTH && i < path.size(); i++) {
                 trimmedNodes.add(path.getNode(i));
@@ -137,28 +148,47 @@ public class PathExecutor {
         } else {
             trimmedPath = path;
         }
-        
+            
         if (!isExecuting.compareAndSet(false, true)) {
             return CompletableFuture.failedFuture(new IllegalStateException("Already executing a path"));
         }
-        
+            
         shouldStop.set(false);
         currentPath = trimmedPath;
         currentPathIndex = 0;
-        
+        retryCount = 0;  // 重置重试计数器
+            
+        // 在开始新路径前，先清除所有正在执行的移动和残留速度
+        movementAdapter.cancelAllMovements();
+        MovementSync.Instance.velocity.set(new Vector3d(0, 0, 0));
+        logger.info("PathExecutor: 已清除所有移动和残留速度，开始执行新路径");
+            
         return executePathStep().whenComplete((result, throwable) -> {
             isExecuting.set(false);
             currentPath = null;
             currentPathIndex = 0;
+            retryCount = 0;  // 重置重试计数器
         });
     }
     
     private CompletableFuture<Void> executePathStep() {
-        if (shouldStop.get() || currentPath == null || currentPathIndex >= currentPath.size()) {
+        if (shouldStop.get()) {
+            logger.info("PathExecutor: 收到停止信号");
             return CompletableFuture.completedFuture(null);
         }
         
+        if (currentPath == null) {
+            logger.info("PathExecutor: currentPath 为 null");
+            return CompletableFuture.completedFuture(null);
+        }
+        
+        if (currentPathIndex >= currentPath.size()) {
+            logger.info("PathExecutor: 已到达路径终点 (index={}/{})", currentPathIndex, currentPath.size());
+            return CompletableFuture.completedFuture(null);
+        }
+            
         if (!movementAdapter.isAvailable()) {
+            logger.error("PathExecutor: Movement 系统不可用");
             return CompletableFuture.failedFuture(new IllegalStateException("Movement system unavailable"));
         }
         
@@ -166,22 +196,72 @@ public class PathExecutor {
         Vector3d targetPos = currentNode.getPosition();
         Vector3d currentPos = movementAdapter.getCurrentPosition();
         
-        // 检查是否已经到达目标点附近
-        if (currentPos.distance(targetPos) < 0.3) {
+        // 检查当前位置是否在路径点附近（处理网络延迟导致的传送）
+        double distance = currentPos.distance(targetPos);
+        
+        // 防止路径点过近导致振荡
+        if (distance < 0.1) {
+            logger.info("PathExecutor: 目标点过近 (距离={:.3f}, index={}/{})，跳过此点", 
+                       String.format("%.3f", distance), currentPathIndex, currentPath.size());
             currentPathIndex++;
             return executePathStep();
         }
         
+        if (distance < 0.5) {
+            logger.info("PathExecutor: 已到达目标点附近 (距离={:.2f}, index={}/{})，前往下一个点", 
+                       String.format("%.2f", distance), currentPathIndex, currentPath.size());
+            currentPathIndex++;
+            return executePathStep();
+        }
+        
+        // 检查是否偏离路径太远
+        if (distance > MAX_DIST_FROM_PATH) {
+            logger.warn("PathExecutor: 偏离路径过远 (距离={:.2f})，尝试重新对齐...", 
+                       String.format("%.2f", distance));
+            // 不立即失败，而是继续尝试移动到目标
+        }
+            
         // 执行移动到目标点
+        logger.info("PathExecutor: 开始移动到 ({}, {}, {}), 距离={:.2f}", 
+                   targetPos.x, targetPos.y, targetPos.z, String.format("%.2f", distance));
         return movementAdapter.moveTo(targetPos).thenCompose(v -> {
-            // 减少延迟以提高执行速度
-            try {
-                Thread.sleep(50); // 从100ms减少到50ms
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return CompletableFuture.failedFuture(e);
+            // 移动完成后，重新获取最新位置并检查是否到达
+            Vector3d newPos = movementAdapter.getCurrentPosition();
+            double newDistance = newPos.distance(targetPos);
+            logger.info("PathExecutor: 移动完成，新位置距离目标={:.2f} (之前距离={:.2f})", 
+                       String.format("%.2f", newDistance), String.format("%.2f", distance));
+            
+            // 如果移动后仍然离目标很远，说明移动失败了
+            if (newDistance > MAX_DIST_FROM_PATH) {
+                logger.warn("PathExecutor: 移动失败，偏离路径过远 (距离={:.2f})", 
+                           String.format("%.2f", newDistance));
+                // 尝试重试一次
+                if (retryCount < MAX_RETRIES) {
+                    retryCount++;
+                    logger.info("PathExecutor: 第 {} 次重试 (最大{}次)", retryCount, MAX_RETRIES);
+                    return executePathStep(); // 重新尝试移动到同一个点
+                } else {
+                    logger.error("PathExecutor: 重试{}次后仍然失败，放弃此路径点", MAX_RETRIES);
+                    currentPathIndex++; // 跳过这个点
+                    retryCount = 0;
+                    return executePathStep();
+                }
             }
             
+            // 移动成功，重置重试计数器
+            retryCount = 0;
+            
+            // 检查是否可以前往下一个点
+            if (newDistance < 0.5) {
+                logger.info("PathExecutor: 已到达目标点附近 (距离={:.2f})，前往下一个点", 
+                           String.format("%.2f", newDistance));
+                currentPathIndex++;
+                return executePathStep();
+            }
+            
+            // 否则继续移动到同一个点
+            logger.info("PathExecutor: 尚未到达目标点 (距离={:.2f})，继续移动", 
+                       String.format("%.2f", newDistance));
             return executePathStep();
         });
     }
