@@ -1,0 +1,15 @@
+pos:
+  description: "查看机器人当前坐标、朝向与所在区块"
+  usage: "pos"
+  aliases: ["whereami"]
+  executor: "top.mcocet.running.commands.PositionCommand"
+block:
+  description: "查看脚下方块，或指定坐标处的方块"
+  usage: "block [x y z]"
+  aliases: ["getblock"]
+  executor: "top.mcocet.running.commands.BlockCommand"
+move:
+  description: "控制机器人移动（前进/后退/左移/右移/跳跃/疾跑/潜行/自动跳跃）"
+  usage: "move <forward|back|left|right|jump|sprint|sneak|autojump|stop> [on|off]"
+  aliases: ["mv"]
+  executor: "top.mcocet.running.commands.MoveCommand"
