@@ -54,34 +54,6 @@ public final class MoveCosts {
     /** 落 N 格的代价表（下标即方块数，覆盖 0..4096） */
     public static final double[] FALL_N_BLOCKS_COST = generateFallNBlocksCost();
 
-    /**
-     * 破坏一个方块所需 tick 数（忠实移植原版 {@code Player.getDestroyProgress}）。
-     *
-     * <p>原版每 tick 累积的破坏进度：{@code damagePerTick = digSpeed / hardness /
-     * (hasCorrectToolForDrops ? 30 : 100)}，进度累到 1 即破。因此破块耗时为
-     * {@code ceil(1 / damagePerTick)}。本方法不处理创造模式（瞬破）与附魔效率
-     * / 疲劳效果，那些留作后续。</p>
-     *
-     * @param hardness            方块硬度（{@code <0} 或 {@code NaN} 视为不可破坏）
-     * @param digSpeed            当前工具对该方块的有效挖掘速度（徒手为 1.0）
-     * @param correctToolForDrops 是否持有可掉落该方块的正确工具（决定 30 / 100 除数）
-     * @return 破块所需 tick；不可破坏返回 {@link #COST_INF}
-     */
-    public static double timeToBreak(double hardness, double digSpeed, boolean correctToolForDrops) {
-        if (Double.isNaN(hardness) || hardness < 0) {
-            return COST_INF; // 未知或不可破坏（基岩、末地传送门等）
-        }
-        if (hardness == 0) {
-            return 1; // 硬度 0（草/雪片等）近似瞬破，至少占一个 tick
-        }
-        double divisor = correctToolForDrops ? 30 : 100;
-        double perTick = digSpeed / hardness / divisor;
-        if (perTick <= 0 || Double.isNaN(perTick)) {
-            return COST_INF;
-        }
-        return Math.ceil(1.0 / perTick);
-    }
-
     private static double[] generateFallNBlocksCost() {
         double[] costs = new double[4097];
         for (int i = 0; i < 4097; i++) {

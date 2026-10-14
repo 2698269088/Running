@@ -67,7 +67,9 @@ public final class GotoCommand extends CommandExecutor {
         int startZ = (int) Math.floor(physics.z());
 
         RunningPathWorld world = new RunningPathWorld(
-                plugin.world(), plugin.blockNames(), true, MAX_FALL_HEIGHT);
+                plugin.world(), plugin.blockNames(),
+                plugin.inventory().hotbarToolModels(plugin.itemRegistry()),
+                true, MAX_FALL_HEIGHT);
         if (!world.isLoaded(startX, startZ)) {
             log.info("[Running] 起点所在区块尚未加载，无法寻路。");
             return;

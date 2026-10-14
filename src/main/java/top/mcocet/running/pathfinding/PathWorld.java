@@ -58,11 +58,6 @@ public interface PathWorld {
     // 破块查询（首版默认判为不可破，由 RunningPathWorld 结合硬度/工具实现）
     // ------------------------------------------------------------------
 
-    /** 当前手持工具快照（计算开始时的只读视图）；默认为徒手 */
-    default HeldTool heldTool() {
-        return HeldTool.HAND;
-    }
-
     /** 该格是否为可被挖掘破坏的方块（区块已加载、非空气/流体、可挖且非不可破） */
     default boolean isBreakable(int x, int y, int z) {
         return false;

@@ -2,6 +2,9 @@ package top.mcocet.running.pathfinding;
 
 import top.mcocet.running.world.BlockNameTable;
 import top.mcocet.running.world.RunningWorld;
+import top.mcocet.running.world.item.ToolModel;
+
+import java.util.List;
 
 /**
  * {@link PathWorld} 到 Running 世界模型的映射实现：方块状态取自 {@link RunningWorld}
@@ -22,18 +25,18 @@ public final class RunningPathWorld implements PathWorld {
     private final BlockNameTable blocks;
     private final boolean allowSprint;
     private final int maxFallHeight;
-    /** 当前手持工具快照（影响破块速度/代价） */
-    private final HeldTool heldTool;
+    /** 计算开始时从背包解析出的候选工具（已去重，不含徒手）；用于破块代价取最优 */
+    private final List<ToolModel> candidateTools;
 
     public RunningPathWorld(RunningWorld world, BlockNameTable blocks, boolean allowSprint, int maxFallHeight) {
-        this(world, blocks, HeldTool.HAND, allowSprint, maxFallHeight);
+        this(world, blocks, List.of(), allowSprint, maxFallHeight);
     }
 
-    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, HeldTool heldTool,
+    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
                             boolean allowSprint, int maxFallHeight) {
         this.world = world;
         this.blocks = blocks;
-        this.heldTool = heldTool != null ? heldTool : HeldTool.HAND;
+        this.candidateTools = candidateTools != null ? List.copyOf(candidateTools) : List.of();
         this.allowSprint = allowSprint;
         this.maxFallHeight = Math.max(0, maxFallHeight);
     }
@@ -104,11 +107,6 @@ public final class RunningPathWorld implements PathWorld {
     }
 
     @Override
-    public HeldTool heldTool() {
-        return heldTool;
-    }
-
-    @Override
     public boolean isBreakable(int x, int y, int z) {
         int state = stateAt(x, y, z);
         if (state == PathWorld.UNLOADED || state == PathWorld.AIR) {
@@ -130,12 +128,20 @@ public final class RunningPathWorld implements PathWorld {
         if (blocks.fluidType(state) != BlockNameTable.FLUID_NONE || !blocks.isDiggable(state)) {
             return MoveCosts.COST_INF;
         }
-        double hardness = blocks.hardness(state);
+        String name = blocks.nameOf(state);
+        float hardness = blocks.hardness(state);
         byte category = blocks.toolCategory(state);
         boolean requiresTool = blocks.requiresCorrectTool(state);
-        double digSpeed = heldTool.digSpeedFor(category);
-        boolean correct = heldTool.correctForDrops(category, requiresTool);
-        return MoveCosts.timeToBreak(hardness, digSpeed, correct);
+        // 徒手（无工具组件）作为基线候选，再用背包中可用的工具逐一试算取最快
+        // （对齐 Baritone：规划时假设会切到对目标方块最优的工具）
+        double best = MiningCalculator.breakTicks(null, name, category, hardness, requiresTool, true);
+        for (ToolModel tool : candidateTools) {
+            double ticks = MiningCalculator.breakTicks(tool, name, category, hardness, requiresTool, true);
+            if (ticks < best) {
+                best = ticks;
+            }
+        }
+        return best;
     }
 
     /**

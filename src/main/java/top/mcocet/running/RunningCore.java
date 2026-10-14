@@ -8,13 +8,17 @@ import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.PlayerPhysics;
 import top.mcocet.running.listeners.ConnectionListener;
 import top.mcocet.running.listeners.EntityListener;
+import top.mcocet.running.listeners.InventoryListener;
 import top.mcocet.running.listeners.KnockbackListener;
 import top.mcocet.running.listeners.PositionListener;
+import top.mcocet.running.listeners.RegistryListener;
 import top.mcocet.running.listeners.RespawnListener;
 import top.mcocet.running.listeners.WorldListener;
 import top.mcocet.running.world.BlockNameTable;
 import top.mcocet.running.world.EntityTracker;
+import top.mcocet.running.world.InventoryState;
 import top.mcocet.running.world.RunningWorld;
+import top.mcocet.running.world.item.ItemRegistry;
 import xin.bbtt.mcbot.Bot;
 
 import java.io.File;
@@ -53,7 +57,11 @@ public final class RunningCore {
     private final BotState botState = new BotState();
     private final RunningWorld world = new RunningWorld();
     private final EntityTracker entityTracker = new EntityTracker();
-    private final List<SessionListener> listeners = new ArrayList<>(6);
+    /** 机器人完整背包与手持槽镜像（网络线程写、引擎/计算线程读） */
+    private final InventoryState inventory = new InventoryState();
+    /** 从注册表解析的物品工具模型（配置阶段一次性写入，之后只读） */
+    private final ItemRegistry itemRegistry = new ItemRegistry();
+    private final List<SessionListener> listeners = new ArrayList<>(8);
 
     private volatile BlockNameTable blockNames = BlockNameTable.empty();
     private volatile PlayerPhysics physics;
@@ -101,6 +109,8 @@ public final class RunningCore {
         listeners.add(new KnockbackListener(botState, movementEngine));
         listeners.add(new WorldListener(world));
         listeners.add(new RespawnListener(botState));
+        listeners.add(new InventoryListener(inventory));
+        listeners.add(new RegistryListener(itemRegistry));
         for (SessionListener listener : listeners) {
             Bot.INSTANCE.addPacketListener(listener, plugin);
         }
@@ -122,6 +132,7 @@ public final class RunningCore {
         listeners.clear();
         world.clear();
         entityTracker.clear();
+        inventory.clear();
         enabled = false;
     }
 
@@ -158,6 +169,20 @@ public final class RunningCore {
 
     public MovementEngine movementEngine() {
         return movementEngine;
+    }
+
+    public EntityTracker entityTracker() {
+        return entityTracker;
+    }
+
+    /** 机器人完整背包与手持槽镜像 */
+    public InventoryState inventory() {
+        return inventory;
+    }
+
+    /** 物品注册表（挖掘工具模型来源） */
+    public ItemRegistry itemRegistry() {
+        return itemRegistry;
     }
 
     /** 寻路计算专用单线程执行器（供 {@code goto} 与 {@code PathingGoal} 提交 A* 计算） */

@@ -6,7 +6,9 @@ import top.mcocet.running.bot.BotState;
 import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.PlayerPhysics;
 import top.mcocet.running.world.BlockNameTable;
+import top.mcocet.running.world.InventoryState;
 import top.mcocet.running.world.RunningWorld;
+import top.mcocet.running.world.item.ItemRegistry;
 import xin.bbtt.mcbot.plugin.Plugin;
 
 import java.util.concurrent.ExecutorService;
@@ -87,5 +89,15 @@ public final class Main implements Plugin {
 
     public ExecutorService pathExecutor() {
         return core.pathExecutor();
+    }
+
+    /** 机器人完整背包与手持槽镜像 */
+    public InventoryState inventory() {
+        return core.inventory();
+    }
+
+    /** 物品注册表（挖掘工具模型来源） */
+    public ItemRegistry itemRegistry() {
+        return core.itemRegistry();
     }
 }
