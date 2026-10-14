@@ -156,6 +156,54 @@ public enum Moves {
         public double cost(PathWorld w, int x, int y, int z) {
             return diagonalCost(w, x, y, z, x - 1, z + 1);
         }
+    },
+
+    BREAK_NORTH(0, 0, -1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return breakTraverseCost(w, x, y, z, x, z - 1);
+        }
+
+        @Override
+        public boolean isBreak() {
+            return true;
+        }
+    },
+
+    BREAK_SOUTH(0, 0, 1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return breakTraverseCost(w, x, y, z, x, z + 1);
+        }
+
+        @Override
+        public boolean isBreak() {
+            return true;
+        }
+    },
+
+    BREAK_EAST(1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return breakTraverseCost(w, x, y, z, x + 1, z);
+        }
+
+        @Override
+        public boolean isBreak() {
+            return true;
+        }
+    },
+
+    BREAK_WEST(-1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return breakTraverseCost(w, x, y, z, x - 1, z);
+        }
+
+        @Override
+        public boolean isBreak() {
+            return true;
+        }
     };
 
     public final int xOffset;
@@ -199,6 +247,11 @@ public enum Moves {
 
     /** 执行时是否需要主动起跳（上台阶）；供 {@link PathingGoal} 注入跳跃 */
     public boolean jumpUp() {
+        return false;
+    }
+
+    /** 本步是否需要先挖掘方块打通（供 {@link PathingGoal} 进入破块子阶段） */
+    public boolean isBreak() {
         return false;
     }
 
@@ -261,6 +314,49 @@ public enum Moves {
             return MoveCosts.COST_INF;
         }
         return MoveCosts.WALK_ONE_BLOCK_COST * SQRT_2;
+    }
+
+    /**
+     * 破块横向穿越：在 {@code canBreak()} 开启时，把目标列脚/头格中不可通行但可挖掘的方块
+     * 视为“挖开后即可走”。代价 = 基础走格（含冲刺系数）+ 各需挖方块 {@code breakCost} 之和。
+     * 脚下不可站、或脚/头任一格既不可通行又不可挖（如基岩/流体/未加载）→ {@link MoveCosts#COST_INF}。
+     * 破块所需 tick 计入 A* 代价，使寻路自然偏向“绕开硬块 / 选最快可挖通道”。
+     */
+    private static double breakTraverseCost(PathWorld w, int x, int y, int z, int destX, int destZ) {
+        if (!w.canBreak()) {
+            return MoveCosts.COST_INF;
+        }
+        if (!w.isLoadedAndStandable(destX, y - 1, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        double breakAdd = 0.0;
+        // 脚部格：不可通行则必须可挖，计入破块代价
+        if (!w.isLoadedAndPassable(destX, y, destZ)) {
+            if (!w.isBreakable(destX, y, destZ)) {
+                return MoveCosts.COST_INF;
+            }
+            double c = w.breakCost(destX, y, destZ);
+            if (c >= MoveCosts.COST_INF) {
+                return MoveCosts.COST_INF;
+            }
+            breakAdd += c;
+        }
+        // 头部格：同理
+        if (!w.isLoadedAndPassable(destX, y + 1, destZ)) {
+            if (!w.isBreakable(destX, y + 1, destZ)) {
+                return MoveCosts.COST_INF;
+            }
+            double c = w.breakCost(destX, y + 1, destZ);
+            if (c >= MoveCosts.COST_INF) {
+                return MoveCosts.COST_INF;
+            }
+            breakAdd += c;
+        }
+        double base = MoveCosts.WALK_ONE_BLOCK_COST;
+        if (w.allowSprint()) {
+            base *= MoveCosts.SPRINT_MULTIPLIER;
+        }
+        return base + breakAdd;
     }
 
     /**

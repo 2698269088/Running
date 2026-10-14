@@ -69,7 +69,8 @@ public final class GotoCommand extends CommandExecutor {
         RunningPathWorld world = new RunningPathWorld(
                 plugin.world(), plugin.blockNames(),
                 plugin.inventory().hotbarToolModels(plugin.itemRegistry()),
-                true, MAX_FALL_HEIGHT);
+                plugin.inventory(), plugin.itemRegistry(),
+                true, true, MAX_FALL_HEIGHT);
         if (!world.isLoaded(startX, startZ)) {
             log.info("[Running] 起点所在区块尚未加载，无法寻路。");
             return;

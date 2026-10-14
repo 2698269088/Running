@@ -1,7 +1,9 @@
 package top.mcocet.running.pathfinding;
 
 import top.mcocet.running.world.BlockNameTable;
+import top.mcocet.running.world.InventoryState;
 import top.mcocet.running.world.RunningWorld;
+import top.mcocet.running.world.item.ItemRegistry;
 import top.mcocet.running.world.item.ToolModel;
 
 import java.util.List;
@@ -24,20 +26,33 @@ public final class RunningPathWorld implements PathWorld {
     private final RunningWorld world;
     private final BlockNameTable blocks;
     private final boolean allowSprint;
+    private final boolean allowBreak;
     private final int maxFallHeight;
     /** 计算开始时从背包解析出的候选工具（已去重，不含徒手）；用于破块代价取最优 */
     private final List<ToolModel> candidateTools;
+    /** 背包与物品表（可为 null）：用于执行时反查“该切哪把工具”的快捷槽 */
+    private final InventoryState inventory;
+    private final ItemRegistry registry;
 
     public RunningPathWorld(RunningWorld world, BlockNameTable blocks, boolean allowSprint, int maxFallHeight) {
-        this(world, blocks, List.of(), allowSprint, maxFallHeight);
+        this(world, blocks, List.of(), null, null, allowSprint, false, maxFallHeight);
     }
 
     public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
                             boolean allowSprint, int maxFallHeight) {
+        this(world, blocks, candidateTools, null, null, allowSprint, false, maxFallHeight);
+    }
+
+    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
+                            InventoryState inventory, ItemRegistry registry,
+                            boolean allowSprint, boolean allowBreak, int maxFallHeight) {
         this.world = world;
         this.blocks = blocks;
         this.candidateTools = candidateTools != null ? List.copyOf(candidateTools) : List.of();
+        this.inventory = inventory;
+        this.registry = registry;
         this.allowSprint = allowSprint;
+        this.allowBreak = allowBreak;
         this.maxFallHeight = Math.max(0, maxFallHeight);
     }
 
@@ -102,6 +117,11 @@ public final class RunningPathWorld implements PathWorld {
     }
 
     @Override
+    public boolean canBreak() {
+        return allowBreak;
+    }
+
+    @Override
     public int maxFallHeight() {
         return maxFallHeight;
     }
@@ -142,6 +162,43 @@ public final class RunningPathWorld implements PathWorld {
             }
         }
         return best;
+    }
+
+    @Override
+    public int bestToolSlotAt(int x, int y, int z) {
+        if (inventory == null || registry == null || !registry.isReady()) {
+            return -1;
+        }
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED || state == PathWorld.AIR) {
+            return -1;
+        }
+        if (blocks.fluidType(state) != BlockNameTable.FLUID_NONE || !blocks.isDiggable(state)) {
+            return -1;
+        }
+        String name = blocks.nameOf(state);
+        float hardness = blocks.hardness(state);
+        byte category = blocks.toolCategory(state);
+        boolean requiresTool = blocks.requiresCorrectTool(state);
+        // 以徒手为基线，逐个快捷栏槽试算，选耗时最短的槽（与 breakCost 的最优估计一致）
+        double bestTicks = MiningCalculator.breakTicks(null, name, category, hardness, requiresTool, true);
+        int bestSlot = -1;
+        for (int slot = 0; slot < InventoryState.HOTBAR_SIZE; slot++) {
+            int id = inventory.itemIdAt(slot);
+            if (id <= 0) {
+                continue;
+            }
+            ToolModel tool = registry.toolOfItem(id);
+            if (tool == null) {
+                continue;
+            }
+            double ticks = MiningCalculator.breakTicks(tool, name, category, hardness, requiresTool, true);
+            if (ticks < bestTicks) {
+                bestTicks = ticks;
+                bestSlot = slot;
+            }
+        }
+        return bestSlot;
     }
 
     /**

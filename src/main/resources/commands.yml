@@ -23,3 +23,8 @@ goto:
   usage: "goto <x y z | x z>"
   aliases: ["go", "path"]
   executor: "top.mcocet.running.commands.GotoCommand"
+act:
+  description: "手动测试挖掘/放置方块（dig 按时长逐 tick 破坏；place 手持物品点击相邻面摆放；stop 取消）"
+  usage: "act <dig|place> <x y z> | act stop"
+  aliases: ["blockact"]
+  executor: "top.mcocet.running.commands.ActCommand"

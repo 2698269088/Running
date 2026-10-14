@@ -1,0 +1,31 @@
+### Build output ###
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### IDE ###
+.idea/
+*.iml
+*.iws
+*.ipr
+
+### Reference / vendor projects (not part of this plugin) ###
+baritone-1.21.4/
+MCProtocolLib-master/
+MovementSync-main/
+Grim-2.0/
+xinbot-2.0.0-RELEASE/
+minecraft/
+
+### Binary / temp ###
+*.exe
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Logs ###
+*.log

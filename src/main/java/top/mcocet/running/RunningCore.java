@@ -11,7 +11,6 @@ import top.mcocet.running.listeners.EntityListener;
 import top.mcocet.running.listeners.InventoryListener;
 import top.mcocet.running.listeners.KnockbackListener;
 import top.mcocet.running.listeners.PositionListener;
-import top.mcocet.running.listeners.RegistryListener;
 import top.mcocet.running.listeners.RespawnListener;
 import top.mcocet.running.listeners.WorldListener;
 import top.mcocet.running.world.BlockNameTable;
@@ -51,6 +50,8 @@ public final class RunningCore {
 
     /** 可选的外部方块名称表文件（工作目录下，用于覆盖内置数据） */
     private static final String BLOCK_TABLE_FILE = "blocks.json";
+    /** 可选的外部物品表文件（工作目录下，用于覆盖内置数据） */
+    private static final String ITEM_TABLE_FILE = "items.json";
 
     private final Main plugin;
 
@@ -59,8 +60,8 @@ public final class RunningCore {
     private final EntityTracker entityTracker = new EntityTracker();
     /** 机器人完整背包与手持槽镜像（网络线程写、引擎/计算线程读） */
     private final InventoryState inventory = new InventoryState();
-    /** 从注册表解析的物品工具模型（配置阶段一次性写入，之后只读） */
-    private final ItemRegistry itemRegistry = new ItemRegistry();
+    /** 物品数字 ID→名称与挖掘工具模型（来源为打包/工作目录的 items.json，加载后只读） */
+    private volatile ItemRegistry itemRegistry = ItemRegistry.empty();
     private final List<SessionListener> listeners = new ArrayList<>(8);
 
     private volatile BlockNameTable blockNames = BlockNameTable.empty();
@@ -87,6 +88,7 @@ public final class RunningCore {
         if (!blockNames.isEmpty()) {
             log.info("[Running] 已加载方块名称表，共覆盖 {} 个方块状态。", blockNames.size());
         }
+        itemRegistry = ItemRegistry.loadDefault(new File(ITEM_TABLE_FILE));
         physics = new PlayerPhysics(botState, world, blockNames, entityTracker);
         movementEngine = new MovementEngine(botState, physics);
         pathExecutor = Executors.newSingleThreadExecutor(runnable -> {
@@ -110,7 +112,6 @@ public final class RunningCore {
         listeners.add(new WorldListener(world));
         listeners.add(new RespawnListener(botState));
         listeners.add(new InventoryListener(inventory));
-        listeners.add(new RegistryListener(itemRegistry));
         for (SessionListener listener : listeners) {
             Bot.INSTANCE.addPacketListener(listener, plugin);
         }

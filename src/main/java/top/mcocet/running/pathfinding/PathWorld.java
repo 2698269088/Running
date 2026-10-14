@@ -58,6 +58,14 @@ public interface PathWorld {
     // 破块查询（首版默认判为不可破，由 RunningPathWorld 结合硬度/工具实现）
     // ------------------------------------------------------------------
 
+    /**
+     * 本次计算是否允许把“挖掘方块”作为通路（生成 BREAK 移动并计其代价）。
+     * 默认 {@code false}：不主动挖块。由 {@link RunningPathWorld} 依据开关返回。
+     */
+    default boolean canBreak() {
+        return false;
+    }
+
     /** 该格是否为可被挖掘破坏的方块（区块已加载、非空气/流体、可挖且非不可破） */
     default boolean isBreakable(int x, int y, int z) {
         return false;
@@ -69,5 +77,13 @@ public interface PathWorld {
      */
     default double breakCost(int x, int y, int z) {
         return MoveCosts.COST_INF;
+    }
+
+    /**
+     * 执行该格挖掘时应切到的快捷栏槽（0..8），使实际耗时匹配 {@link #breakCost} 的最优估计；
+     * 徒手最快或无可切换工具时返回 {@code -1}。默认 {@code -1}。
+     */
+    default int bestToolSlotAt(int x, int y, int z) {
+        return -1;
     }
 }

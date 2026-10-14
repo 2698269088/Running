@@ -1,11 +1,18 @@
 package top.mcocet.running.pathfinding;
 
+import org.cloudburstmc.math.vector.Vector3i;
+import org.geysermc.mcprotocollib.network.ClientSession;
+import org.geysermc.mcprotocollib.network.packet.Packet;
+import org.geysermc.mcprotocollib.protocol.data.game.entity.object.Direction;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundSetCarriedItemPacket;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import top.mcocet.running.bot.BlockActionGoal;
 import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.MovementGoal;
 import top.mcocet.running.bot.PlayerInput;
 import top.mcocet.running.bot.PlayerPhysics;
+import xin.bbtt.mcbot.Bot;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +62,11 @@ public final class PathingGoal implements MovementGoal {
     private static final int CHUNK_RETRY_MAX = 30;
     /** 总重算次数上限（病态循环兜底） */
     private static final int MAX_TOTAL_REPLANS = 256;
+    
+    /** 单个破块步的挖块总 tick 预算上限（超时未打通→放弃重算，防止无限卡挖） */
+    private static final int MAX_MINE_TICKS_PER_STEP = 400;
+    /** 站立眼高（相对脚部 y），用于计算挖掘朝向 */
+    private static final double EYE_HEIGHT = 1.62D;
 
     /** 每 tick 最大转向角（度）——朝向限速，避免急转抖动 */
     private static final float MAX_YAW_STEP_DEG = 30.0F;
@@ -85,6 +97,18 @@ public final class PathingGoal implements MovementGoal {
     private int stuckTicks;
     private double lastCheckX = Double.NaN;
     private double lastCheckZ = Double.NaN;
+
+    // 破块执行（引擎线程私有）
+    /** 当前正在驱动的挖块子目标（复用 {@link BlockActionGoal}）；null 表示未在挖 */
+    private BlockActionGoal activeMine;
+    /** {@link #activeMine} 对应的目标格编码（防止目标变更时不重建） */
+    private long activeMineKey;
+    /** 当前正在挖的路径步索引（随步前进重置计时） */
+    private int mineStepIndex = -1;
+    /** 本步累计挖块 tick（超预算则判不可破放弃） */
+    private int mineTicks;
+    /** 上次发送的手持槽（避免重复发包） */
+    private int lastCarriedSlot = -1;
 
     public PathingGoal(Goal goal, PathWorld world, double arriveRadius, ExecutorService executor) {
         this.goal = goal;
@@ -271,6 +295,12 @@ public final class PathingGoal implements MovementGoal {
 
         Path.Step step = path.steps().get(index);
         NodePos dest = step.dest;
+
+        // 破块步：先挖通目标列，未打通前不前进（BlockActionGoal 自行转向并按 duration 计时）
+        if (step.move.isBreak() && handleMining(engine, step, dest, px, py, pz)) {
+            return;
+        }
+
         double targetX = dest.x + 0.5;
         double targetZ = dest.z + 0.5;
         double dx = targetX - px;
@@ -365,6 +395,142 @@ public final class PathingGoal implements MovementGoal {
     /** 当前步是否为平地直走 / 斜走。 */
     private static boolean isFlatForward(Moves move) {
         return move.name().startsWith("TRAVERSE") || move.name().startsWith("DIAGONAL");
+    }
+
+    // ------------------------------------------------------------------
+    // 破块执行（引擎线程；Stage 4）
+    // ------------------------------------------------------------------
+
+    /**
+     * 处理破块步：若目标列脚/头格仍被可挖方块阻挡，则驱动一个 {@link BlockActionGoal} 子目标
+     * 逐 tick 挖掘（必要时先切到最优工具槽），本 tick 消费（不前进）。目标已畅通则返回
+     * {@code false}，交回正常的行走逻辑。
+     *
+     * <p>安全性：{@code requiredTicks} 取规划期 {@link PathWorld#breakCost} 的最优（最快工具）
+     * 估计并留正裕量；服务器按“实际手持 + 硬度”自主计时，按住时长只可能偏慢不可能偏快，
+     * 故绝不触发 fastbreak。切槽若未生效，也只是“没断开→到预算后放弃重算”。</p>
+     */
+    private boolean handleMining(MovementEngine engine, Path.Step step, NodePos dest, double px, double py, double pz) {
+        // 进入新步：重置计时与挖块子目标
+        if (mineStepIndex != index) {
+            mineStepIndex = index;
+            mineTicks = 0;
+            activeMine = null;
+        }
+
+        // 找第一个仍被阻挡、需要挖的格：脚格优先，其次头格
+        int bx;
+        int by;
+        int bz;
+        boolean needMine;
+        if (!world.isPassable(dest.x, dest.y, dest.z)) {
+            bx = dest.x;
+            by = dest.y;
+            bz = dest.z;
+            needMine = true;
+        } else if (!world.isPassable(dest.x, dest.y + 1, dest.z)) {
+            bx = dest.x;
+            by = dest.y + 1;
+            bz = dest.z;
+            needMine = true;
+        } else {
+            needMine = false;
+            bx = by = bz = 0;
+        }
+
+        // 目标列已畅通：撤掉挖块子目标，交回行走逻辑
+        if (!needMine) {
+            activeMine = null;
+            return false;
+        }
+
+        // 目标格不可挖（基岩 / 流体 / 未加载）：放弃本步并重算
+        if (!world.isBreakable(bx, by, bz)) {
+            giveUpMining(engine, px, py, pz);
+            return true;
+        }
+
+        long key = blockKey(bx, by, bz);
+        if (activeMine == null || activeMineKey != key) {
+            startDig(bx, by, bz, key, px, py, pz);
+        }
+        if (activeMine == null) {
+            giveUpMining(engine, px, py, pz);
+            return true;
+        }
+
+        activeMine.tick(engine);
+        mineTicks++;
+        if (activeMine.isFinished()) {
+            // 本轮挖完（或超时 / 出距放弃）：撤下，下一 tick 重新评估（可能轮到头格或已畅通）
+            activeMine = null;
+        }
+        if (mineTicks > MAX_MINE_TICKS_PER_STEP) {
+            giveUpMining(engine, px, py, pz);
+            return true;
+        }
+        return true;
+    }
+
+    /** 新建针对 (bx,by,bz) 的挖块子目标：先按需切到最优工具槽，再按规划时长建 {@link BlockActionGoal}。 */
+    private void startDig(int bx, int by, int bz, long key, double px, double py, double pz) {
+        double cost = world.breakCost(bx, by, bz);
+        int required = (int) Math.ceil(cost) + 2; // 正裕量：只可能偏慢，绝不 fastbreak
+        int slot = world.bestToolSlotAt(bx, by, bz);
+        if (slot >= 0 && slot != lastCarriedSlot) {
+            sendCarried(slot);
+            lastCarriedSlot = slot;
+        }
+        Direction face = faceTowardPlayer(bx, by, bz, px, py, pz);
+        activeMine = BlockActionGoal.dig(Vector3i.from(bx, by, bz), face, required);
+        activeMineKey = key;
+    }
+
+    /** 放弃破块：撤销在途挖掘，清空路径并请求（卡住）重算。 */
+    private void giveUpMining(MovementEngine engine, double px, double py, double pz) {
+        if (activeMine != null) {
+            activeMine.onFinish(engine, false);
+            activeMine = null;
+        }
+        path = null;
+        resetStuck();
+        if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+            requestRecompute(px, py, pz, true);
+        }
+    }
+
+    /** 目标方块朝向玩家的面（用于 START/FINISH 命中面）。横穿为主，平局偏向水平面。 */
+    private static Direction faceTowardPlayer(int bx, int by, int bz, double px, double py, double pz) {
+        double dx = px - (bx + 0.5);
+        double dz = pz - (bz + 0.5);
+        double dy = py - by; // 玩家脚部相对方块所在层
+        double ax = Math.abs(dx);
+        double ay = Math.abs(dy);
+        double az = Math.abs(dz);
+        if (ax >= ay && ax >= az) {
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        }
+        if (az >= ay) {
+            return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+        return dy > 0 ? Direction.UP : Direction.DOWN;
+    }
+
+    /** 方块坐标 → 唯一 long 键（对齐原版 BlockPos.asLong 的分位打包）。 */
+    private static long blockKey(int x, int y, int z) {
+        return (((long) x) << 42) ^ (((long) z) << 21) ^ ((long) y);
+    }
+
+    private static void sendCarried(int slot) {
+        send(new ServerboundSetCarriedItemPacket(Math.max(0, Math.min(8, slot))));
+    }
+
+    private static void send(Packet packet) {
+        ClientSession session = Bot.INSTANCE.getSession();
+        if (session == null || !session.isConnected()) {
+            return;
+        }
+        session.send(packet);
     }
 
     /**
