@@ -44,6 +44,11 @@ public final class AABB {
         return new AABB(minX - dx, minY - dy, minZ - dz, maxX + dx, maxY + dy, maxZ + dz);
     }
 
+    /** 各方向收缩（对齐 MC {@code AABB.deflate}；负值扩张） */
+    public AABB deflate(double dx, double dy, double dz) {
+        return inflate(-dx, -dy, -dz);
+    }
+
     /** 向移动方向扩张（对齐 MC {@code AABB.expandTowards}） */
     public AABB expandTowards(double dx, double dy, double dz) {
         double newMinX = dx < 0.0 ? minX + dx : minX;

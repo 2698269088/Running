@@ -4,6 +4,7 @@ import org.geysermc.mcprotocollib.network.ClientSession;
 import org.geysermc.mcprotocollib.protocol.MinecraftProtocol;
 import org.geysermc.mcprotocollib.protocol.data.ProtocolState;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.player.PlayerState;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.ServerboundClientTickEndPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.level.ServerboundPlayerInputPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundMovePlayerPosPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundMovePlayerPosRotPacket;
@@ -33,16 +34,29 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <li>按官方 {@code LocalPlayer.sendPosition} 策略发送位置包：
  *       位移平方超过 (2.0E-4)² 或每 20 tick 提醒一次时发
  *       Pos / Rot / PosRot 包，着地或水平碰撞状态变化时发 StatusOnly 包。</li>
+ *   <li>末尾发送 ServerboundClientTickEndPacket（1.21.2+ 客户端 tick 结束包，
+ *       对齐官方 {@code Minecraft.tick}）：Grim 的 TickTimer 据此标记本 tick 边界，
+ *       要求任意两个飞行包之间必须夹一个 tick 结束包，否则报 type=flying。</li>
  * </ol></p>
  *
  * <p>机器人移动的本质与官方客户端一致：按输入键预测物理位移，
- * 再把预测结果发给服务器。</p>
+ * 再把预测结果发给服务器；服务器下发的传送与击退/爆炸冲量经
+ * 本引擎写回物理状态（见“服务器同步对接”）。</p>
  */
 public final class MovementEngine {
     private static final Logger log = LoggerFactory.getLogger(MovementEngine.class.getSimpleName());
 
     /** tick 周期（毫秒），对应 20 TPS */
     private static final long TICK_INTERVAL_MS = 50L;
+
+    /**
+     * 飞行包最小间隔（纳秒），约为一个 tick 周期的一半。
+     * <p>用于单发包守卫：正常情况下相邻两次发送间隔约 50ms，恒不小于该阈值，
+     * 因此不会拦截任何常规每-tick 发送；仅拦截异常的紧邻连发，确保每个 tick
+     * 至多一个飞行包——Grim TickTimer 会在一个 tick 结束包之前收到多于一个飞行包
+     * 时报 type=end，故这里杜绝一切每 tick 多发的可能。</p>
+     */
+    private static final long MIN_FLYING_INTERVAL_NS = 25_000_000L;
 
     /** 位置发送位移阈值·平方（对齐 LocalPlayer.sendPosition：Mth.square(2.0E-4)） */
     private static final double POSITION_SEND_THRESHOLD_SQR = 2.0E-4 * 2.0E-4;
@@ -71,6 +85,9 @@ public final class MovementEngine {
     private boolean lastSprinting;
     private int lastInputMask;
     private int positionReminder;
+
+    /** 上一次发出飞行包的时刻（纳秒），用于单发包守卫 */
+    private long lastFlyingNano;
 
     /** 请求下一次 tick 强制发送位置包（服务器传送后使用；由网络线程写入） */
     private volatile boolean forceSyncPending;
@@ -144,6 +161,12 @@ public final class MovementEngine {
         sendInputIfChanged();
         sendSprintIfNeeded();
         sendPosition();
+
+        // 4) tick 结束包（对齐官方 Minecraft.tick 末尾）：本 tick 的所有飞行/输入包
+        //    发完后必发一个 ServerboundClientTickEndPacket，向服务器标记本 tick 边界。
+        //    Grim TickTimer 要求任意两个飞行包之间夹一个 tick 结束包，否则报 type=flying；
+        //    静止 tick 无飞行包时同样发送（与官方一致，供服务器按 idle tick 预测）。
+        sendClientTickEnd();
     }
 
     private void driveGoal() {
@@ -196,6 +219,18 @@ public final class MovementEngine {
                 || deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ > POSITION_SEND_THRESHOLD_SQR
                 || positionReminder >= POSITION_REMINDER_INTERVAL;
         boolean rot = deltaYaw != 0.0F || deltaPitch != 0.0F;
+        boolean statusOnly = !move && !rot
+                && (lastOnGround != onGround || lastHorizontalCollision != horizontalCollision);
+        boolean willSend = move || rot || statusOnly;
+
+        // 单发包守卫：本 tick 至多一个飞行包，且与上一次飞行包保持最小间隔。
+        // 正常节律（每 ~50ms 一个 tick）下恒不触发；仅拦截异常连发。配合每 tick
+        // 末尾的 tick 结束包，保证“飞行包 ≤1 且两飞行包之间必有 tick 结束包”，
+        // 从而不触发 Grim TickTimer 的 type=flying / type=end。
+        long now = System.nanoTime();
+        if (willSend && lastFlyingNano != 0L && now - lastFlyingNano < MIN_FLYING_INTERVAL_NS) {
+            return;
+        }
 
         if (move && rot) {
             session.send(new ServerboundMovePlayerPosRotPacket(
@@ -206,8 +241,11 @@ public final class MovementEngine {
         } else if (rot) {
             session.send(new ServerboundMovePlayerRotPacket(
                     onGround, horizontalCollision, yaw, pitch));
-        } else if (lastOnGround != onGround || lastHorizontalCollision != horizontalCollision) {
+        } else if (statusOnly) {
             session.send(new ServerboundMovePlayerStatusOnlyPacket(onGround, horizontalCollision));
+        }
+        if (willSend) {
+            lastFlyingNano = now;
         }
 
         if (move) {
@@ -223,6 +261,12 @@ public final class MovementEngine {
         }
         lastOnGround = onGround;
         lastHorizontalCollision = horizontalCollision;
+    }
+
+    private void sendClientTickEnd() {
+        ClientSession session = Bot.INSTANCE.getSession();
+        if (session == null || !session.isConnected()) return;
+        session.send(ServerboundClientTickEndPacket.INSTANCE);
     }
 
     private void sendSprintIfNeeded() {
@@ -311,7 +355,7 @@ public final class MovementEngine {
     }
 
     // ------------------------------------------------------------------
-    // 服务器传送对接
+    // 服务器同步对接（传送与击退）
     // ------------------------------------------------------------------
 
     /**
@@ -325,6 +369,25 @@ public final class MovementEngine {
                                double deltaX, double deltaY, double deltaZ) {
         physics.reset(x, y, z, yaw, pitch, deltaX, deltaY, deltaZ);
         forceSyncPending = true;
+    }
+
+    /**
+     * 自身速度包（ClientboundSetEntityMotionPacket）：用包内速度整体替换当前速度
+     * （对齐官方 {@code ClientPacketListener.handleSetEntityMotion →
+     * Entity.lerpMotion → setDeltaMovement}）。近战/弓箭/钓鱼竿击退、实体推挤
+     * 与 mace 冲击均经由该包下发；不强制发送位置包（与官方一致，
+     * 由常规发送策略在后续 tick 跟进）。
+     */
+    public void handleSetMotion(double movementX, double movementY, double movementZ) {
+        physics.setDeltaMovement(movementX, movementY, movementZ);
+    }
+
+    /**
+     * 爆炸冲量（ClientboundExplodePacket.playerKnockback）：在现有速度上叠加
+     * （对齐官方 {@code handleExplosion → LocalPlayer.addDeltaMovement}）。
+     */
+    public void handleExplosionKnockback(double knockbackX, double knockbackY, double knockbackZ) {
+        physics.addDeltaMovement(knockbackX, knockbackY, knockbackZ);
     }
 
     /** 请求下一次 tick 强制发送一次位置包 */

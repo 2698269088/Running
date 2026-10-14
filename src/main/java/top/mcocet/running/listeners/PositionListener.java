@@ -6,7 +6,6 @@ import org.geysermc.mcprotocollib.network.packet.Packet;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.player.PositionElement;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.player.ClientboundPlayerPositionPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.level.ServerboundAcceptTeleportationPacket;
-import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundMovePlayerPosRotPacket;
 import top.mcocet.running.bot.BotState;
 import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.math.Vec3;
@@ -17,11 +16,13 @@ import java.util.List;
  * 处理服务器的位置同步（传送）包。
  *
  * <p>服务器通过 ClientboundPlayerPositionPacket 强制校正机器人位置：
- * 必须回执 ServerboundAcceptTeleportationPacket（携带传送 ID），
- * 否则服务器会持续重发传送包直至超时踢出；回执之后再回报一次
- * 位置包（onGround 与水平碰撞均填 false，对齐官方），让服务器
- * 确认机器人已就位（对齐官方 {@code ClientPacketListener.handleMovePlayer}
- * 的处理顺序）。</p>
+ * 必须即时回执 ServerboundAcceptTeleportationPacket（携带传送 ID），
+ * 否则服务器会持续重发传送包直至超时踢出。校正后的位置回报<b>不</b>在
+ * 此即时补发——{@link MovementEngine#handleTeleport} 已登记强制同步，
+ * 由移动引擎下一个 tick 作为唯一的飞行包出口统一发出（对齐官方：客户端
+ * 只即时回执，位置回报随常规 {@code LocalPlayer.sendPosition} 发送）。
+ * 即时补发会在 setback 时叠加出每 tick 多于一发的飞行包，触发 Grim
+ * TickTimer（"每服务器 tick 飞行包额度"）报警。</p>
  *
  * <p>各字段按 relatives 列表决定绝对/相对，对齐官方
  * {@code PositionMoveRotation.calculateAbsolute}：
@@ -94,10 +95,12 @@ public final class PositionListener extends SessionAdapter {
         // 3) 绝对重置物理状态（位置/朝向/速度；不改变冲刺、碰撞与跳跃冷却）
         movementEngine.handleTeleport(x, y, z, yaw, pitch, deltaX, deltaY, deltaZ);
 
-        // 4) 确认收到传送（必须）
+        // 4) 确认收到传送（必须）。位置回报不在此即时发送：handleTeleport 已置
+        //    forceSyncPending，由移动引擎的下一个 tick 统一发出校正后的位置包
+        //    （对齐官方：回执即时、位置回报随常规 tick 一起发送）。
+        //    即时补发会让服务器每次 setback 都多出一个飞行包，叠加引擎自身每 tick 的
+        //    飞行包，突破 Grim TickTimer 的"每服务器 tick 飞行包额度"，故必须收拢到
+        //    tick 单一出口，杜绝连发。
         session.send(new ServerboundAcceptTeleportationPacket(positionPacket.getId()));
-
-        // 5) 回报校正后的位置，完成同步（官方顺序：先回执、后位置；两标志官方填 false）
-        session.send(new ServerboundMovePlayerPosRotPacket(false, false, x, y, z, yaw, pitch));
     }
 }

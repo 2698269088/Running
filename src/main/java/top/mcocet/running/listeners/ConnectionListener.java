@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.mcocet.running.bot.BotState;
 import top.mcocet.running.world.RunningWorld;
+import xin.bbtt.mcbot.Bot;
 
 import java.util.List;
 
@@ -28,7 +29,8 @@ import java.util.List;
  *       响应性，不回会被踢出；</li>
  *   <li>缓存 dimension_type 注册表（取世界 min_y / height），
  *       并根据生物群系注册表大小推算调色板位宽；</li>
- *   <li>登录包中记录实体 ID，并按当前维度 id 应用世界尺寸；</li>
+ *   <li>登录包中记录实体 ID，并按当前维度 id 应用世界尺寸；同时打印
+ *       协商到的协议版本，供核对 blocks.json / collision_shapes.bin 的数据版本；</li>
  *   <li>重生包（含维度切换）按新维度重新应用世界尺寸
  *       （对齐官方客户端重生后重建关卡的处理）。</li>
  * </ul></p>
@@ -96,8 +98,46 @@ public final class ConnectionListener extends SessionAdapter {
     private void handleLogin(ClientboundLoginPacket login) {
         state.setEntityId(login.getEntityId());
         int dimensionId = applyDimension(login.getCommonPlayerSpawnInfo().getDimension());
-        log.info("[Running] 已登录：实体 ID={}，维度 ID={}，世界高度范围=[{}, {})。",
-                login.getEntityId(), dimensionId, world.getMinY(), world.getMinY() + world.getHeight());
+        log.info("[Running] 已登录：实体 ID={}，协商协议 {}，维度 ID={}，世界高度范围=[{}, {})。",
+                login.getEntityId(), describeProtocol(), dimensionId,
+                world.getMinY(), world.getMinY() + world.getHeight());
+    }
+
+    /**
+     * 描述机器人协商到的协议，用于核对方块数据版本。
+     *
+     * <p>{@code blocks.json} 与 {@code collision_shapes.bin} 都按协议状态 ID 索引，
+     * 而 xinbot 创建协议时不带版本参数（{@code new MinecraftProtocol(name)}），
+     * 实际协商的是其内嵌 mcprotocollib 的当前版本；服务端有 ViaVersion / ViaBackwards
+     * 时，这个版本可以低于服务端版本（旧协议客户端收到的是旧版本的方块编号）。
+     * 因此不能拿服务端版本当对齐依据，必须看这里输出的协商协议。</p>
+     *
+     * <p>mcprotocollib 各版本取版本号的 getter 名称不稳定，所以用反射探测常见
+     * getter，取到哪个就打印哪个；全都取不到时至少给出协议实现类名。</p>
+     */
+    private static String describeProtocol() {
+        Object protocol;
+        try {
+            protocol = Bot.INSTANCE.getProtocol();
+        } catch (Throwable t) {
+            return "不可用（" + t + "）";
+        }
+        if (protocol == null) {
+            return "尚未初始化";
+        }
+        StringBuilder sb = new StringBuilder(protocol.getClass().getSimpleName());
+        for (String getter : new String[]{"getProtocolVersion", "getMinecraftVersion",
+                "getVersion", "getName"}) {
+            try {
+                Object value = protocol.getClass().getMethod(getter).invoke(protocol);
+                if (value != null) {
+                    sb.append(", ").append(getter.substring(3)).append('=').append(value);
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // 当前 mcprotocollib 版本没有该 getter，继续尝试下一个
+            }
+        }
+        return sb.toString();
     }
 
     /**

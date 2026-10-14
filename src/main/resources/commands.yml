@@ -13,3 +13,13 @@ move:
   usage: "move <forward|back|left|right|jump|sprint|sneak|autojump|stop> [on|off]"
   aliases: ["mv"]
   executor: "top.mcocet.running.commands.MoveCommand"
+look:
+  description: "调整机器人视角（yaw 偏航角 / pitch 俯仰角，度；~ 前缀表示相对）"
+  usage: "look [<yaw> <pitch>]"
+  aliases: ["view", "rotate"]
+  executor: "top.mcocet.running.commands.LookCommand"
+goto:
+  description: "A* 寻路到目标坐标（基础移动；move stop 可中断）"
+  usage: "goto <x y z | x z>"
+  aliases: ["go", "path"]
+  executor: "top.mcocet.running.commands.GotoCommand"

@@ -4,15 +4,23 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.mcocet.running.Main;
 import top.mcocet.running.bot.BotState;
+import top.mcocet.running.math.AABB;
+import top.mcocet.running.world.CollisionShapes;
 import top.mcocet.running.world.RunningWorld;
 import xin.bbtt.mcbot.command.Command;
 import xin.bbtt.mcbot.command.CommandExecutor;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * block 命令：查询脚下方块，或指定坐标处的方块。
  *
  * <p>用法：{@code block}（脚下）或 {@code block <x> <y> <z>}。
- * 输出方块状态 ID；若工作目录提供了 blocks.json，则同时显示方块名称。</p>
+ * 输出方块状态 ID、几何来源、碰撞盒数与顶面高度；若数据表可用，
+ * 则同时显示方块名称。这一行就能同时验证两件事：
+ * 状态 ID 与看到的方块是否对得上（数据版本对不对），
+ * 以及形状是否合理（几何取权威表还是退化到启发式）。</p>
  */
 public final class BlockCommand extends CommandExecutor {
     private final Logger log = LoggerFactory.getLogger(BlockCommand.class.getSimpleName());
@@ -61,7 +69,12 @@ public final class BlockCommand extends CommandExecutor {
 
         String name = plugin.blockNames().nameOf(stateId);
         if (name != null) {
-            log.info("[Running] ({}, {}, {}) 的方块: {}（状态 ID {}）", x, y, z, name, stateId);
+            CollisionShapes shapes = CollisionShapes.get();
+            List<AABB> boxes = new ArrayList<>(4);
+            plugin.blockNames().addCollisionBoxes(stateId, 0, 0, 0, boxes);
+            log.info("[Running] ({}, {}, {}) 的方块: {}（状态 ID {}，{} 个碰撞盒，顶面高度 {}，几何来源 {}）",
+                    x, y, z, name, stateId, boxes.size(), plugin.blockNames().collisionHeight(stateId),
+                    shapes != null && shapes.covers(stateId) ? "权威表" : "启发式兜底");
         } else if (stateId == RunningWorld.AIR) {
             log.info("[Running] ({}, {}, {}) 的方块: 空气（状态 ID 0）", x, y, z);
         } else if (plugin.blockNames().isEmpty()) {

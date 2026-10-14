@@ -9,6 +9,8 @@ import top.mcocet.running.world.BlockNameTable;
 import top.mcocet.running.world.RunningWorld;
 import xin.bbtt.mcbot.plugin.Plugin;
 
+import java.util.concurrent.ExecutorService;
+
 /**
  * Running —— xinbot 移动引擎插件（入口主类，对应 plugin.yml 中的 main）。
  *
@@ -49,7 +51,7 @@ public final class Main implements Plugin {
     @Override
     public void onEnable() {
         core.enable();
-        log.info("[Running] 移动引擎已启动，输入 pos / block 查看机器人状态。");
+        log.info("[Running] 移动引擎已启动，输入 pos / look / block 查看机器人状态与视角。");
     }
 
     @Override
@@ -81,5 +83,9 @@ public final class Main implements Plugin {
 
     public PlayerPhysics physics() {
         return core.physics();
+    }
+
+    public ExecutorService pathExecutor() {
+        return core.pathExecutor();
     }
 }
