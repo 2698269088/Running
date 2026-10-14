@@ -1,6 +1,6 @@
 # Running
 
-面向 [Xinbot](https://github.com/huangdihd/xinbot) 的 **服务端 Bot 移动引擎插件**，实现 GrimAC 友好的 20 TPS 物理模拟、A* 寻路与 Baritone 式方块挖掘通路。
+面向 [Xinbot](https://github.com/huangdihd/xinbot) 的 **服务端 Bot 移动引擎插件**，实现启发式反作弊（例如Vulcan和Matrix）友好的 20 TPS 物理模拟、A* 寻路与 Baritone 式方块挖掘通路。
 
 ## 特性
 
