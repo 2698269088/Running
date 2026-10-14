@@ -22,27 +22,6 @@
 | 运行环境 | Minecraft 1.21.11（ViaVersion 协商） |
 | 数据源 | minecraft-data `blocks.json` + `items.json` + `collision_shapes.bin` |
 
-## 项目结构
-
-```
-src/main/java/top/mcocet/running/
-├── bot/               # 移动引擎、物理模拟、BlockActionGoal
-├── commands/          # 控制台命令实现
-├── listeners/         # 连接/世界包监听
-├── math/              # 向量、旋转工具
-├── pathfinding/       # A* 寻路核心（Moves, PathFinder, PathingGoal, ...）
-├── world/             # 世界缓存、方块表、背包、物品注册表
-├── Main.java          # 插件入口
-└── RunningCore.java   # 生命周期 & 组件装配
-
-src/main/resources/
-├── blocks.json            # 29671 方块状态数据
-├── collision_shapes.bin   # 碰撞形状表
-├── items.json             # 1505 物品 + 28 工具建模
-├── commands.yml           # 命令注册
-└── plugin.yml             # Xinbot 插件描述
-```
-
 ## 快速开始
 
 ### 前置条件
@@ -79,15 +58,6 @@ move stop
 act dig 100 63 200
 act place 100 64 200
 ```
-
-## 开发路线
-
-- [x] Stage 1：方块数据基础（hardness / diggable / toolCategory / requiresTool）
-- [x] Stage 2：背包 & 工具模型（items.json + ToolMaterial 速度）
-- [x] Stage 3：破块代价数学（MiningCalculator）
-- [x] Stage 4：破块穿越（BREAK Moves + A* 代价 + PathingGoal 逐 tick 执行）
-- [ ] Stage 5：方块放置执行（搭桥 / 搭柱）
-- [ ] Stage 6：寻路超时脱困（偏置落点 + Favoring 加权）
 
 ## 数据来源
 
