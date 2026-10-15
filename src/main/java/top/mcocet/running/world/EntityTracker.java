@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 附近实体跟踪表：维护会推挤本地玩家的实体位置与插值状态，
@@ -45,10 +46,13 @@ public final class EntityTracker {
     private static final double DELTA_GRID = 4096.0;
 
     private final Map<Integer, TrackedEntity> entities = new HashMap<>();
+    /** 玩家 UUID → 当前实体 ID（仅带 UUID 且进入跟踪表的实体登记；供按名定位） */
+    private final Map<UUID, Integer> uuidToId = new HashMap<>();
 
     /** 单个被跟踪实体的状态（位置为脚底中心；base 为增量解码基准） */
     private static final class TrackedEntity {
         final int id;
+        final UUID uuid;
         final String typeName;
         final double width;
         final double height;
@@ -65,9 +69,10 @@ public final class EntityTracker {
         double targetZ;
         int lerpSteps;
 
-        TrackedEntity(int id, String typeName, double width, double height,
+        TrackedEntity(int id, UUID uuid, String typeName, double width, double height,
                       double x, double y, double z, float yaw, float pitch) {
             this.id = id;
+            this.uuid = uuid;
             this.typeName = typeName;
             this.width = width;
             this.height = height;
@@ -108,14 +113,19 @@ public final class EntityTracker {
     /**
      * 新增实体（对齐 handleAddEntity：直接放置，无插值）。
      * 不推本地玩家的类型（{@link EntitySizes#pushesLocalPlayer} 为 false）忽略。
+     *
+     * @param uuid 实体 UUID（玩家经 {@code ClientboundAddEntityPacket} 携带；可为 null）
      */
-    public synchronized void addEntity(int id, String typeName, double x, double y, double z,
+    public synchronized void addEntity(int id, UUID uuid, String typeName, double x, double y, double z,
                                        float yaw, float pitch) {
         if (!EntitySizes.pushesLocalPlayer(typeName)) {
             return;
         }
         float[] size = EntitySizes.dimensionsOf(typeName);
-        entities.put(id, new TrackedEntity(id, typeName, size[0], size[1], x, y, z, yaw, pitch));
+        entities.put(id, new TrackedEntity(id, uuid, typeName, size[0], size[1], x, y, z, yaw, pitch));
+        if (uuid != null) {
+            uuidToId.put(uuid, id);
+        }
     }
 
     /**
@@ -189,7 +199,10 @@ public final class EntityTracker {
     /** 移除实体（对齐 handleRemoveEntities） */
     public synchronized void removeEntities(int[] ids) {
         for (int id : ids) {
-            entities.remove(id);
+            TrackedEntity entity = entities.remove(id);
+            if (entity != null && entity.uuid != null) {
+                uuidToId.remove(entity.uuid, id);
+            }
         }
     }
 
@@ -199,6 +212,7 @@ public final class EntityTracker {
      */
     public synchronized void clear() {
         entities.clear();
+        uuidToId.clear();
     }
 
     // ------------------------------------------------------------------
@@ -217,6 +231,26 @@ public final class EntityTracker {
             entity.z += alpha * (entity.targetZ - entity.z);
             --entity.lerpSteps;
         }
+    }
+
+    /**
+     * 按 UUID 查询该玩家实体的当前位置快照（脱离跟踪表锁安全读取）；
+     * 未跟踪（未加载 / 已移除 / 非推挤类型）返回 {@code null}。
+     */
+    public synchronized EntitySnapshot findByUuid(UUID uuid) {
+        if (uuid == null) {
+            return null;
+        }
+        Integer id = uuidToId.get(uuid);
+        if (id == null) {
+            return null;
+        }
+        TrackedEntity entity = entities.get(id);
+        if (entity == null) {
+            return null;
+        }
+        return new EntitySnapshot(entity.id, entity.typeName,
+                entity.x, entity.y, entity.z, entity.width, entity.height);
     }
 
     /**

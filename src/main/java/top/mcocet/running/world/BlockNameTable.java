@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -319,6 +320,8 @@ public final class BlockNameTable {
     private final byte[] requiresToolByStateId;
     /** 表外状态 ID 告警的一次性标记（避免逐格查询反复刷日志） */
     private final AtomicBoolean outOfRangeWarned = new AtomicBoolean();
+    /** “放置后可作为站立面”（有碰撞、非流体）的方块名集合；首次查询时惰性构建 */
+    private volatile Set<String> standableBlockNames;
 
     private BlockNameTable(String[] namesByStateId, byte[] boxTypesByStateId, byte[] stairDataByStateId,
                            byte[] slabDataByStateId, byte[] fluidTypeByStateId, byte[] fluidAmountByStateId,
@@ -1263,6 +1266,30 @@ public final class BlockNameTable {
             return null;
         }
         return namesByStateId[stateId];
+    }
+
+    /**
+     * 该方块名是否存在“放到此处可作为站立面”的状态（有碰撞且非流体）。用于判断
+     * 背包物品能否用作缺口搭桥的放置方块（方块类物品的物品名与方块名通常一致，
+     * 见 {@code ItemRegistry}）。
+     */
+    public boolean isStandableBlockName(String name) {
+        if (name == null) {
+            return false;
+        }
+        Set<String> snapshot = standableBlockNames;
+        if (snapshot == null) {
+            Set<String> built = new HashSet<>();
+            for (int id = 0; id < namesByStateId.length; id++) {
+                String n = namesByStateId[id];
+                if (n != null && fluidTypeByStateId[id] == FLUID_NONE && hasCollision(id)) {
+                    built.add(n);
+                }
+            }
+            standableBlockNames = built;
+            snapshot = built;
+        }
+        return snapshot.contains(name);
     }
 
     /**

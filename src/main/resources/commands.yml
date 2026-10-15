@@ -19,8 +19,8 @@ look:
   aliases: ["view", "rotate"]
   executor: "top.mcocet.running.commands.LookCommand"
 goto:
-  description: "A* 寻路到目标坐标（基础移动；move stop 可中断）"
-  usage: "goto <x y z | x z>"
+  description: "A* 寻路到目标坐标，或持续跟随某玩家（可加 dig/move 前缀切换挖掘优先/移动优先；move stop 可中断）"
+  usage: "goto [dig|move] <x y z | x z | follow <玩家名>>"
   aliases: ["go", "path"]
   executor: "top.mcocet.running.commands.GotoCommand"
 act:
@@ -28,3 +28,8 @@ act:
   usage: "act <dig|place> <x y z> | act stop"
   aliases: ["blockact"]
   executor: "top.mcocet.running.commands.ActCommand"
+inventory:
+  description: "查看背包与物品栏，并移动物品（move 任意槽/hotbar 换到快捷栏/quick 整组快捷移动；stop 取消）"
+  usage: "inventory [move <from> <to> [one] | hotbar <from> <0-8> | quick <slot> | stop]"
+  aliases: ["inv"]
+  executor: "top.mcocet.running.commands.InventoryCommand"

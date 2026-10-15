@@ -35,6 +35,12 @@ public final class MoveCosts {
     public static final double CENTER_AFTER_FALL_COST = WALK_ONE_BLOCK_COST - WALK_OFF_BLOCK_COST; // 0.927
 
     /**
+     * 灵魂沙上走一格（对齐 Baritone {@code WALK_ONE_OVER_SOUL_SAND_COST}）：
+     * 原版 {@code speedFactor=0.4}，故耗时为平地的 {@code 1/0.4} 倍。
+     */
+    public static final double WALK_ONE_OVER_SOUL_SAND_COST = WALK_ONE_BLOCK_COST / 0.4; // 11.583
+
+    /**
      * 不可通行的哨兵代价。刻意不用 {@link Double#MAX_VALUE}，因为它会与其它代价或
      * 彼此相加时溢出为负数。
      */
@@ -42,6 +48,13 @@ public final class MoveCosts {
 
     /** 启发式乘子（对应 Baritone {@code costHeuristic}，默认 1.0 以保证可采纳性） */
     public static final double COST_HEURISTIC = 1.0;
+
+    /**
+     * “挖掘优先”模式下挖块耗时的代价乘子（&lt;1）：把真实挖掘 tick 数打折计入 A* 代价，
+     * 使寻路倾向直挖穿墙而非绕路（对齐 Baritone 调低 {@code mineBlockMultiplier} 的思路）。
+     * 打折仅作用于挖块附加项，基础走格代价不变，故启发式仍可采纳（单步最低代价不变）。
+     */
+    public static final double DIG_PRIORITY_BREAK_DISCOUNT = 0.3;
 
     public static final double FALL_1_25_BLOCKS_COST = distanceToTicks(1.25);
     public static final double FALL_0_25_BLOCKS_COST = distanceToTicks(0.25);
@@ -53,6 +66,26 @@ public final class MoveCosts {
 
     /** 落 N 格的代价表（下标即方块数，覆盖 0..4096） */
     public static final double[] FALL_N_BLOCKS_COST = generateFallNBlocksCost();
+
+    /**
+     * Parkour 跳跨 {@code dist} 格（含起跳格）的水平代价，对齐 Baritone
+     * {@code MovementParkour.costFromJumpDistance}：2/3 格按走速、4 格（仅冲刺）按跑速。
+     *
+     * @param dist 跳跃水平跨度（2..4）
+     * @return 该跨度的移动耗时（单位≈tick）
+     */
+    public static double parkourCost(int dist) {
+        switch (dist) {
+            case 2:
+                return WALK_ONE_BLOCK_COST * 2;
+            case 3:
+                return WALK_ONE_BLOCK_COST * 3;
+            case 4:
+                return SPRINT_ONE_BLOCK_COST * 4;
+            default:
+                throw new IllegalArgumentException("非法的 parkour 跨度: " + dist);
+        }
+    }
 
     private static double[] generateFallNBlocksCost() {
         double[] costs = new double[4097];

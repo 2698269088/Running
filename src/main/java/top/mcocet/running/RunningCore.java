@@ -10,12 +10,14 @@ import top.mcocet.running.listeners.ConnectionListener;
 import top.mcocet.running.listeners.EntityListener;
 import top.mcocet.running.listeners.InventoryListener;
 import top.mcocet.running.listeners.KnockbackListener;
+import top.mcocet.running.listeners.PlayerListListener;
 import top.mcocet.running.listeners.PositionListener;
 import top.mcocet.running.listeners.RespawnListener;
 import top.mcocet.running.listeners.WorldListener;
 import top.mcocet.running.world.BlockNameTable;
 import top.mcocet.running.world.EntityTracker;
 import top.mcocet.running.world.InventoryState;
+import top.mcocet.running.world.PlayerList;
 import top.mcocet.running.world.RunningWorld;
 import top.mcocet.running.world.item.ItemRegistry;
 import xin.bbtt.mcbot.Bot;
@@ -58,6 +60,8 @@ public final class RunningCore {
     private final BotState botState = new BotState();
     private final RunningWorld world = new RunningWorld();
     private final EntityTracker entityTracker = new EntityTracker();
+    /** 玩家列表镜像（UUID ↔ 用户名），供按用户名定位玩家（如 goto follow） */
+    private final PlayerList playerList = new PlayerList();
     /** 机器人完整背包与手持槽镜像（网络线程写、引擎/计算线程读） */
     private final InventoryState inventory = new InventoryState();
     /** 物品数字 ID→名称与挖掘工具模型（来源为打包/工作目录的 items.json，加载后只读） */
@@ -65,6 +69,8 @@ public final class RunningCore {
     private final List<SessionListener> listeners = new ArrayList<>(8);
 
     private volatile BlockNameTable blockNames = BlockNameTable.empty();
+    /** 功能配置（{@code Running/config.properties}，载入一次后只读；供 {@code goto} 等命令读取开关） */
+    private volatile RunningConfig config = null;
     private volatile PlayerPhysics physics;
     private volatile MovementEngine movementEngine;
     /** 寻路计算专用单线程执行器（所有 A* 计算串行于此，不占用 20TPS 引擎线程） */
@@ -84,12 +90,14 @@ public final class RunningCore {
     /** 装配阶段：加载方块名称表，创建物理与移动引擎（在会话建立之前调用） */
     public synchronized void load() {
         if (loaded) return;
+        config = RunningConfig.load();
         blockNames = BlockNameTable.loadDefault(new File(BLOCK_TABLE_FILE));
         if (!blockNames.isEmpty()) {
             log.info("[Running] 已加载方块名称表，共覆盖 {} 个方块状态。", blockNames.size());
         }
         itemRegistry = ItemRegistry.loadDefault(new File(ITEM_TABLE_FILE));
         physics = new PlayerPhysics(botState, world, blockNames, entityTracker);
+        physics.setAutoJumpEnabled(config.autoJump());
         movementEngine = new MovementEngine(botState, physics);
         pathExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "Running-Path-Compute");
@@ -107,6 +115,7 @@ public final class RunningCore {
         listeners.clear();
         listeners.add(new ConnectionListener(botState, world));
         listeners.add(new EntityListener(botState, entityTracker));
+        listeners.add(new PlayerListListener(playerList));
         listeners.add(new PositionListener(botState, movementEngine));
         listeners.add(new KnockbackListener(botState, movementEngine));
         listeners.add(new WorldListener(world));
@@ -133,6 +142,7 @@ public final class RunningCore {
         listeners.clear();
         world.clear();
         entityTracker.clear();
+        playerList.clear();
         inventory.clear();
         enabled = false;
     }
@@ -164,6 +174,11 @@ public final class RunningCore {
         return blockNames;
     }
 
+    /** 功能配置（{@code Running/config.properties}）；尚未 {@link #load()} 时为 {@code null}。 */
+    public RunningConfig config() {
+        return config;
+    }
+
     public PlayerPhysics physics() {
         return physics;
     }
@@ -174,6 +189,11 @@ public final class RunningCore {
 
     public EntityTracker entityTracker() {
         return entityTracker;
+    }
+
+    /** 玩家列表镜像（UUID ↔ 用户名） */
+    public PlayerList playerList() {
+        return playerList;
     }
 
     /** 机器人完整背包与手持槽镜像 */

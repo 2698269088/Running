@@ -54,6 +54,35 @@ public interface PathWorld {
     /** 允许的最大无伤坠落高度（格），超出判为不可落 */
     int maxFallHeight();
 
+    /**
+     * 是否允许 Parkour（冲刺/步行跳跨 1–3 格空隙）。默认 {@code false}，
+     * 由 {@link RunningPathWorld} 依据开关返回。
+     */
+    default boolean allowParkour() {
+        return false;
+    }
+
+    /**
+     * 该格作为站立面时对“走一格”代价的乘子（&ge;1）：平地 / 普通固体为 1，
+     * 灵魂沙等减速方块 {@code >1}。默认 1。
+     */
+    default double surfaceCostMultiplier(int x, int y, int z) {
+        return 1.0;
+    }
+
+    /** 该格是否为可攀爬方块（梯子 / 藤蔓）：攀爬格不作为起跳蹬踏面。默认 false。 */
+    default boolean isClimbable(int x, int y, int z) {
+        return false;
+    }
+
+    /**
+     * 该格是否为危险方块（岩浆 / 火 / 岩浆块等）：既不可通行也不可站立，
+     * Parkour 落点越冲也需避开。默认 {@code false}。
+     */
+    default boolean isDangerousAt(int x, int y, int z) {
+        return false;
+    }
+
     // ------------------------------------------------------------------
     // 破块查询（首版默认判为不可破，由 RunningPathWorld 结合硬度/工具实现）
     // ------------------------------------------------------------------
@@ -63,6 +92,16 @@ public interface PathWorld {
      * 默认 {@code false}：不主动挖块。由 {@link RunningPathWorld} 依据开关返回。
      */
     default boolean canBreak() {
+        return false;
+    }
+
+    /**
+     * 寻路模式是否为“挖掘优先”：{@code true} 时挖块耗时在代价中打折
+     * （见 {@link MoveCosts#DIG_PRIORITY_BREAK_DISCOUNT}），使 A* 倾向直挖穿过障碍
+     * 而非绕路；且隐含允许破块（即使 allow-break 关闭）。默认 {@code false}，
+     * 即“移动优先”：仅在挖比绕更省时才挖。由 {@link RunningPathWorld} 依据配置返回。
+     */
+    default boolean digPriority() {
         return false;
     }
 
@@ -85,5 +124,37 @@ public interface PathWorld {
      */
     default int bestToolSlotAt(int x, int y, int z) {
         return -1;
+    }
+
+    /**
+     * 为“挖通该格”规划最优工具：在<b>整个背包（0..35）</b>中挑选使破坏耗时最短的物品，
+     * 并给出执行动作（手持哪个快捷槽、是否需要先从主背包把工具换到快捷栏）。相较仅看
+     * 快捷栏的 {@link #bestToolSlotAt}，本方法能利用背包内的合适工具，避免徒手慢挖/判定不可破
+     * 而卡住。默认返回 {@link DigTool#unbreakable()}（不支持的工具感知由具体实现提供）。
+     */
+    default DigTool planDigTool(int x, int y, int z) {
+        return DigTool.unbreakable();
+    }
+
+    // ------------------------------------------------------------------
+    // 放置搭桥查询（无路可踩的缺口用背包方块铺地板；默认不支持）
+    // ------------------------------------------------------------------
+
+    /**
+     * 本次寻路是否允许“放置搭桥”：路径上没有可踩方块时用背包里的方块物品
+     * 放置出一个站立面（USE_ITEM_ON 合法交互，非破坏）。默认 {@code false}，
+     * 由 {@link RunningPathWorld} 依据开关返回。
+     */
+    default boolean canPlace() {
+        return false;
+    }
+
+    /**
+     * 为“搭桥放置”选物品：在<b>整个背包（0..35）</b>中挑选名称对应“放置后可站立方块”
+     * （有碰撞、非流体、非危险、非重力沙砾）的堆，数量多者优先（数量决定可铺桥长）；
+     * 若其位于主背包则给出搬迁方案。无可用方块/信息缺失返回 {@link PlaceTool#none()}。
+     */
+    default PlaceTool planPlaceBlock() {
+        return PlaceTool.none();
     }
 }

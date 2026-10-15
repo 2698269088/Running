@@ -6,7 +6,9 @@ import top.mcocet.running.bot.BotState;
 import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.PlayerPhysics;
 import top.mcocet.running.world.BlockNameTable;
+import top.mcocet.running.world.EntityTracker;
 import top.mcocet.running.world.InventoryState;
+import top.mcocet.running.world.PlayerList;
 import top.mcocet.running.world.RunningWorld;
 import top.mcocet.running.world.item.ItemRegistry;
 import xin.bbtt.mcbot.plugin.Plugin;
@@ -83,6 +85,11 @@ public final class Main implements Plugin {
         return core.blockNames();
     }
 
+    /** 功能配置（{@code Running/config.properties}） */
+    public RunningConfig config() {
+        return core.config();
+    }
+
     public PlayerPhysics physics() {
         return core.physics();
     }
@@ -94,6 +101,16 @@ public final class Main implements Plugin {
     /** 机器人完整背包与手持槽镜像 */
     public InventoryState inventory() {
         return core.inventory();
+    }
+
+    /** 附近实体跟踪表（供按玩家名解析位置） */
+    public EntityTracker entityTracker() {
+        return core.entityTracker();
+    }
+
+    /** 玩家列表镜像（UUID ↔ 用户名） */
+    public PlayerList playerList() {
+        return core.playerList();
     }
 
     /** 物品注册表（挖掘工具模型来源） */

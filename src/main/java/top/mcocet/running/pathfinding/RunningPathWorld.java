@@ -27,6 +27,11 @@ public final class RunningPathWorld implements PathWorld {
     private final BlockNameTable blocks;
     private final boolean allowSprint;
     private final boolean allowBreak;
+    /** 挖掘优先模式：挖块代价打折且隐含允许破块（见 {@link #canBreak()}） */
+    private final boolean digPriority;
+    /** 允许“放置搭桥”：无路可踩的缺口用背包方块铺地板（见 {@link #canPlace()}） */
+    private final boolean allowPlace;
+    private final boolean allowParkour;
     private final int maxFallHeight;
     /** 计算开始时从背包解析出的候选工具（已去重，不含徒手）；用于破块代价取最优 */
     private final List<ToolModel> candidateTools;
@@ -35,17 +40,39 @@ public final class RunningPathWorld implements PathWorld {
     private final ItemRegistry registry;
 
     public RunningPathWorld(RunningWorld world, BlockNameTable blocks, boolean allowSprint, int maxFallHeight) {
-        this(world, blocks, List.of(), null, null, allowSprint, false, maxFallHeight);
+        this(world, blocks, List.of(), null, null, allowSprint, false, false, maxFallHeight);
     }
 
     public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
                             boolean allowSprint, int maxFallHeight) {
-        this(world, blocks, candidateTools, null, null, allowSprint, false, maxFallHeight);
+        this(world, blocks, candidateTools, null, null, allowSprint, false, false, maxFallHeight);
     }
 
     public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
                             InventoryState inventory, ItemRegistry registry,
                             boolean allowSprint, boolean allowBreak, int maxFallHeight) {
+        this(world, blocks, candidateTools, inventory, registry, allowSprint, allowBreak, false, maxFallHeight);
+    }
+
+    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
+                            InventoryState inventory, ItemRegistry registry,
+                            boolean allowSprint, boolean allowBreak, boolean allowParkour, int maxFallHeight) {
+        this(world, blocks, candidateTools, inventory, registry,
+                allowSprint, allowBreak, false, allowParkour, maxFallHeight);
+    }
+
+    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
+                            InventoryState inventory, ItemRegistry registry,
+                            boolean allowSprint, boolean allowBreak, boolean digPriority,
+                            boolean allowParkour, int maxFallHeight) {
+        this(world, blocks, candidateTools, inventory, registry,
+                allowSprint, allowBreak, digPriority, false, allowParkour, maxFallHeight);
+    }
+
+    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
+                            InventoryState inventory, ItemRegistry registry,
+                            boolean allowSprint, boolean allowBreak, boolean digPriority,
+                            boolean allowPlace, boolean allowParkour, int maxFallHeight) {
         this.world = world;
         this.blocks = blocks;
         this.candidateTools = candidateTools != null ? List.copyOf(candidateTools) : List.of();
@@ -53,6 +80,9 @@ public final class RunningPathWorld implements PathWorld {
         this.registry = registry;
         this.allowSprint = allowSprint;
         this.allowBreak = allowBreak;
+        this.digPriority = digPriority;
+        this.allowPlace = allowPlace;
+        this.allowParkour = allowParkour;
         this.maxFallHeight = Math.max(0, maxFallHeight);
     }
 
@@ -117,8 +147,105 @@ public final class RunningPathWorld implements PathWorld {
     }
 
     @Override
+    public boolean allowParkour() {
+        return allowParkour;
+    }
+
+    @Override
+    public double surfaceCostMultiplier(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED || state == PathWorld.AIR) {
+            return 1.0;
+        }
+        float speed = blocks.speedFactor(state);
+        if (speed <= 0.0F || speed >= 1.0F) {
+            return 1.0;
+        }
+        // 减速方块（如灵魂沙 speedFactor=0.4）→ 走一格耗时按 1/speed 放大
+        return 1.0 / speed;
+    }
+
+    @Override
+    public boolean isClimbable(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED || state == PathWorld.AIR) {
+            return false;
+        }
+        String name = blocks.nameOf(state);
+        return "ladder".equals(name) || "vine".equals(name) || "scaffolding".equals(name);
+    }
+
+    @Override
+    public boolean isDangerousAt(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED || state == PathWorld.AIR) {
+            return false;
+        }
+        return isDangerous(state);
+    }
+
+    @Override
     public boolean canBreak() {
-        return allowBreak;
+        // 挖掘优先模式隐含允许破块（否则“直挖前进”无从谈起）
+        return allowBreak || digPriority;
+    }
+
+    @Override
+    public boolean digPriority() {
+        return digPriority;
+    }
+
+    @Override
+    public boolean canPlace() {
+        return allowPlace;
+    }
+
+    @Override
+    public PlaceTool planPlaceBlock() {
+        if (inventory == null || registry == null || !registry.isReady()) {
+            return PlaceTool.none();
+        }
+        int bestSlot = -1;
+        int bestAmount = 0;
+        for (int slot = 0; slot < InventoryState.MAIN_SIZE; slot++) {
+            int id = inventory.itemIdAt(slot);
+            if (id <= 0 || inventory.amountAt(slot) <= 0) {
+                continue;
+            }
+            if (!isPlaceableFloorName(registry.itemName(id))) {
+                continue;
+            }
+            int amount = inventory.amountAt(slot);
+            if (amount > bestAmount) {
+                bestAmount = amount;
+                bestSlot = slot;
+            }
+        }
+        if (bestSlot < 0) {
+            return PlaceTool.none();
+        }
+        if (bestSlot < InventoryState.HOTBAR_SIZE) {
+            return new PlaceTool(bestSlot, -1, true);
+        }
+        // 主背包方块：搬到某个快捷栏槽（优先空槽，否则占用当前手持槽）
+        int target = firstFreeHotbarSlot();
+        if (target < 0) {
+            target = inventory.heldSlot();
+        }
+        return new PlaceTool(target, bestSlot, true);
+    }
+
+    /**
+     * 物品名是否可用作搭桥地板：存在同名“有碰撞且非流体”的方块，且非危险（岩浆/火等）
+     * 也非重力方块（沙/砾砂放下后会坠落，无法铺成桥面）。
+     */
+    private boolean isPlaceableFloorName(String name) {
+        if (name == null || isDangerousName(name) || !blocks.isStandableBlockName(name)) {
+            return false;
+        }
+        return !name.equals("sand") && !name.equals("red_sand")
+                && !name.equals("gravel") && !name.equals("suspicious_sand")
+                && !name.equals("suspicious_gravel");
     }
 
     @Override
@@ -201,6 +328,77 @@ public final class RunningPathWorld implements PathWorld {
         return bestSlot;
     }
 
+    @Override
+    public DigTool planDigTool(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED || state == PathWorld.AIR) {
+            return DigTool.unbreakable();
+        }
+        if (blocks.fluidType(state) != BlockNameTable.FLUID_NONE || !blocks.isDiggable(state)) {
+            return DigTool.unbreakable();
+        }
+        // 无背包 / 物品表信息：退回“按 breakCost 估计、不搬迁”，仅保证可挖性判断
+        if (inventory == null || registry == null || !registry.isReady()) {
+            return new DigTool(breakCost(x, y, z), -1, -1, true);
+        }
+
+        String name = blocks.nameOf(state);
+        float hardness = blocks.hardness(state);
+        byte category = blocks.toolCategory(state);
+        boolean requiresTool = blocks.requiresCorrectTool(state);
+
+        // 徒手为基线，扫描整个背包（0..35：快捷栏 + 主背包）逐件试算，取耗时最短者
+        double bestTicks = MiningCalculator.breakTicks(null, name, category, hardness, requiresTool, true);
+        int bestHotbar = -1;   // 最优工具已在快捷栏（0..8）
+        int bestMain = -1;     // 最优工具在主背包（9..35），需先搬到快捷栏
+        for (int slot = 0; slot < InventoryState.MAIN_SIZE; slot++) {
+            int id = inventory.itemIdAt(slot);
+            if (id <= 0) {
+                continue;
+            }
+            ToolModel tool = registry.toolOfItem(id);
+            if (tool == null) {
+                continue;
+            }
+            double ticks = MiningCalculator.breakTicks(tool, name, category, hardness, requiresTool, true);
+            if (ticks < bestTicks) {
+                bestTicks = ticks;
+                if (slot < InventoryState.HOTBAR_SIZE) {
+                    bestHotbar = slot;
+                    bestMain = -1;
+                } else {
+                    bestMain = slot;
+                    bestHotbar = -1;
+                }
+            }
+        }
+
+        if (bestMain >= 0) {
+            // 主背包工具需搬到某个快捷栏槽：优先空槽，否则占用当前手持槽
+            int target = firstFreeHotbarSlot();
+            if (target < 0) {
+                target = inventory.heldSlot();
+            }
+            return new DigTool(bestTicks, target, bestMain, true);
+        }
+        if (bestHotbar >= 0) {
+            int equip = (bestHotbar == inventory.heldSlot()) ? -1 : bestHotbar;
+            return new DigTool(bestTicks, equip, -1, true);
+        }
+        // 徒手已是最快：无需改变手持、无需搬迁
+        return new DigTool(bestTicks, -1, -1, true);
+    }
+
+    /** 快捷栏中第一个空槽（0..8），全占则返回 -1。 */
+    private int firstFreeHotbarSlot() {
+        for (int slot = 0; slot < InventoryState.HOTBAR_SIZE; slot++) {
+            if (inventory.itemIdAt(slot) <= 0) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
     /**
      * 危险方块启发式（首版仅按名称 / 流体粗判）：火、岩浆相关、岩浆怪块、仙人掌、
      * 甜浆果、细雪等。命中则既不可通行也不可站立。更完整的危险规避留作后续增量。
@@ -209,7 +407,11 @@ public final class RunningPathWorld implements PathWorld {
         if (blocks.fluidType(state) == BlockNameTable.FLUID_LAVA) {
             return true;
         }
-        String name = blocks.nameOf(state);
+        return isDangerousName(blocks.nameOf(state));
+    }
+
+    /** 按名称的危险启发式（也供搭桥选物品复用）。 */
+    private static boolean isDangerousName(String name) {
         if (name == null) {
             return false;
         }

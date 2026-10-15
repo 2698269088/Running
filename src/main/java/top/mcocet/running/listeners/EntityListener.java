@@ -93,7 +93,7 @@ public final class EntityListener extends SessionAdapter {
         if (type == null) {
             return;
         }
-        tracker.addEntity(add.getEntityId(), type.name().toLowerCase(Locale.ROOT),
+        tracker.addEntity(add.getEntityId(), add.getUuid(), type.name().toLowerCase(Locale.ROOT),
                 add.getX(), add.getY(), add.getZ(), add.getYaw(), add.getPitch());
     }
 

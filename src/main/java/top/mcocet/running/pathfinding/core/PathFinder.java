@@ -18,7 +18,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class PathFinder {
-    private static final Logger logger = LoggerFactory.getLogger("RunningMovementAdapterSystem");
+    private static final Logger logger = LoggerFactory.getLogger("RunningPathFinder");
 
     private static final ExecutorService executor = Executors.newFixedThreadPool(2);
     
