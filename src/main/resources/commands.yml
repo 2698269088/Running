@@ -1,0 +1,35 @@
+pos:
+  description: "查看机器人当前坐标、朝向与所在区块"
+  usage: "pos"
+  aliases: ["whereami"]
+  executor: "top.mcocet.running.commands.PositionCommand"
+block:
+  description: "查看脚下方块，或指定坐标处的方块"
+  usage: "block [x y z]"
+  aliases: ["getblock"]
+  executor: "top.mcocet.running.commands.BlockCommand"
+move:
+  description: "控制机器人移动（前进/后退/左移/右移/跳跃/疾跑/潜行/自动跳跃）"
+  usage: "move <forward|back|left|right|jump|sprint|sneak|autojump|stop> [on|off]"
+  aliases: ["mv"]
+  executor: "top.mcocet.running.commands.MoveCommand"
+look:
+  description: "调整机器人视角（yaw 偏航角 / pitch 俯仰角，度；~ 前缀表示相对）"
+  usage: "look [<yaw> <pitch>]"
+  aliases: ["view", "rotate"]
+  executor: "top.mcocet.running.commands.LookCommand"
+goto:
+  description: "A* 寻路到目标坐标，或持续跟随某玩家（可加 dig/move 前缀切换挖掘优先/移动优先；move stop 可中断）"
+  usage: "goto [dig|move] <x y z | x z | follow <玩家名>>"
+  aliases: ["go", "path"]
+  executor: "top.mcocet.running.commands.GotoCommand"
+act:
+  description: "手动测试挖掘/放置方块（dig 按时长逐 tick 破坏；place 手持物品点击相邻面摆放；stop 取消）"
+  usage: "act <dig|place> <x y z> | act stop"
+  aliases: ["blockact"]
+  executor: "top.mcocet.running.commands.ActCommand"
+inventory:
+  description: "查看背包与物品栏，并移动物品（move 任意槽/hotbar 换到快捷栏/quick 整组快捷移动；stop 取消）"
+  usage: "inventory [move <from> <to> [one] | hotbar <from> <0-8> | quick <slot> | stop]"
+  aliases: ["inv"]
+  executor: "top.mcocet.running.commands.InventoryCommand"
