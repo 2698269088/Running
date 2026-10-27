@@ -92,6 +92,20 @@ public final class MovementEngine {
     /** 请求下一次 tick 强制发送位置包（服务器传送后使用；由网络线程写入） */
     private volatile boolean forceSyncPending;
 
+    /**
+     * 最近一次传送回声包的记账（网络线程随回声包写入，引擎下一 tick 开头应用）。
+     * <p>对齐官方 handleMovePlayer：收到传送后客户端立即以精确传送坐标回送一个
+     * PosRot（onGround/horizontalCollision 恒 false），Grim 据此接受传送并豁免该包的
+     * TickTimer/GroundSpoof 检查。回声由网络线程发出，引擎需同步 xLast/yRotLast 等
+     * 发送状态，避免下一 tick 把同一坐标当作"新位移"重复发送；lastFlyingNano 同步
+     * 后，单发包守卫会把紧邻回声的下一发常规包顺延到再下一 tick（该包冗余，可顺延）。</p>
+     */
+    private volatile TeleportEcho pendingTeleportEcho;
+
+    /** 传送回声包记账：精确传送坐标/朝向与发出时刻 */
+    private record TeleportEcho(double x, double y, double z, float yaw, float pitch, long nanoTime) {
+    }
+
     public MovementEngine(BotState state, PlayerPhysics physics) {
         this.state = state;
         this.physics = physics;
@@ -148,6 +162,10 @@ public final class MovementEngine {
     private void tick() {
         if (!isInGame()) return;
 
+        // 0) 应用网络线程发来的传送回声记账（若有）：同步发送状态，
+        //    使本 tick 的 sendPosition 以回声包为基准判定位移/朝向变化
+        applyTeleportEcho();
+
         // 1) 复位输入并驱动目标（目标可为本 tick 填输入）
         currentInput = PlayerInput.EMPTY;
         driveGoal();
@@ -156,6 +174,11 @@ public final class MovementEngine {
 
         // 2) 物理推进
         physics.tick(currentInput);
+
+        // 2b) 起滑包（对齐 LocalPlayer.aiStep：tryToStartFallFlying 成功的同一 tick
+        //     立即发 START_FALL_FLYING，先于本 tick 的输入/位置包；停滑无需发包，
+        //     服务器按位置包 onGround 自行裁定）
+        sendGlideStartIfNeeded();
 
         // 3) 发送（对齐官方 LocalPlayer.tick：输入包 → 冲刺包 → 位置包）
         sendInputIfChanged();
@@ -190,6 +213,30 @@ public final class MovementEngine {
         if (protocol == null) return false;
         return protocol.getInboundState() == ProtocolState.GAME
                 && protocol.getOutboundState() == ProtocolState.GAME;
+    }
+
+    /**
+     * 登记传送回声（网络线程在发出回声 PosRot 后调用）：引擎在下一 tick 开头
+     * 应用该记账（见 {@link #applyTeleportEcho}）。
+     */
+    public void noteTeleportEcho(double x, double y, double z, float yaw, float pitch) {
+        pendingTeleportEcho = new TeleportEcho(x, y, z, yaw, pitch, System.nanoTime());
+    }
+
+    /** 应用待记账的传送回声：把发送状态对齐到回声包的内容与时刻 */
+    private void applyTeleportEcho() {
+        TeleportEcho echo = pendingTeleportEcho;
+        if (echo == null) return;
+        pendingTeleportEcho = null;
+        xLast = echo.x();
+        yLast = echo.y();
+        zLast = echo.z();
+        yRotLast = echo.yaw();
+        xRotLast = echo.pitch();
+        // 回声包的 onGround/horizontalCollision 恒为 false（对齐官方 handleMovePlayer）
+        lastOnGround = false;
+        lastHorizontalCollision = false;
+        lastFlyingNano = echo.nanoTime();
     }
 
     // ------------------------------------------------------------------
@@ -282,6 +329,22 @@ public final class MovementEngine {
         lastSprinting = sprinting;
     }
 
+    /**
+     * 本 tick 物理层刚起滑时发送鞘翅起飞包（对齐官方 START_FALL_FLYING，
+     * MCProtocolLib 枚举名 START_ELYTRA_FLYING，id=6）。发于驱动目标与物理推进
+     * 之后、输入/位置包之前，与本 tick 的 tick 结束包同属一个发包窗口，
+     * 不改变每 tick 至多一个飞行包的单发包守卫约定。
+     */
+    private void sendGlideStartIfNeeded() {
+        if (!physics.consumeGlideStartPending()) return;
+
+        ClientSession session = Bot.INSTANCE.getSession();
+        int entityId = state.getEntityId();
+        if (session == null || !session.isConnected() || entityId < 0) return;
+
+        session.send(new ServerboundPlayerCommandPacket(entityId, PlayerState.START_ELYTRA_FLYING));
+    }
+
     private void sendInputIfChanged() {
         // 自动跳跃注入 tick 的输入帧含 jump（对齐官方 makeJump 后发送的 keyPresses）
         PlayerInput sentInput = physics.wasAutoJumpInjected()
@@ -352,6 +415,15 @@ public final class MovementEngine {
     /** 物理实例（供目标与控制台查询位置、速度、碰撞状态） */
     public PlayerPhysics physics() {
         return physics;
+    }
+
+    /**
+     * 服务器能力包声明的创造模式（委托 {@link BotState}）：创造下原版
+     * {@code ItemStack.consume} 为 no-op——服务器受理使用但不扣物品、
+     * 不回推槽位更新，任何"消耗回包观测"都不适用。
+     */
+    public boolean isCreative() {
+        return state.isCreative();
     }
 
     // ------------------------------------------------------------------

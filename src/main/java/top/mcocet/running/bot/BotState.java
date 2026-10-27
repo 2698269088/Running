@@ -21,6 +21,9 @@ public final class BotState {
     private boolean onGround = true;
     private boolean horizontalCollision;
     private boolean sprinting;
+    private boolean fallFlying;
+    /** 服务器能力包声明的创造模式（创造不扣物品/耐久，鞘翅耐久预算门控应旁路） */
+    private boolean creative;
     private boolean positioned;
     private int entityId = -1;
 
@@ -35,13 +38,28 @@ public final class BotState {
         }
     }
 
+    /** 服务器 PlayerAbilities 包写入创造模式标志（网络线程调用，命令线程只读）。 */
+    public void setCreative(boolean value) {
+        synchronized (lock) {
+            this.creative = value;
+        }
+    }
+
+    /** 是否处于创造模式（耐久不消耗，飞行预算门控/换翅自动旁路）。 */
+    public boolean isCreative() {
+        synchronized (lock) {
+            return creative;
+        }
+    }
+
     /**
      * 批量写入物理模拟结果（由 {@link PlayerPhysics} 每个 tick 调用一次），
      * 单次加锁保证快照一致性。
      */
     public void applyPhysics(double x, double y, double z, float yaw, float pitch,
                              double velocityX, double velocityY, double velocityZ,
-                             boolean onGround, boolean horizontalCollision, boolean sprinting) {
+                             boolean onGround, boolean horizontalCollision, boolean sprinting,
+                             boolean fallFlying) {
         synchronized (lock) {
             this.x = x;
             this.y = y;
@@ -54,6 +72,7 @@ public final class BotState {
             this.onGround = onGround;
             this.horizontalCollision = horizontalCollision;
             this.sprinting = sprinting;
+            this.fallFlying = fallFlying;
             this.positioned = true;
         }
     }
@@ -139,11 +158,18 @@ public final class BotState {
         }
     }
 
+    /** 是否处于鞘翅滑翔状态（由物理引擎维护，对齐 Entity 共享标志位 7） */
+    public boolean isFallFlying() {
+        synchronized (lock) {
+            return fallFlying;
+        }
+    }
+
     /** 在同一把锁内读取全部运动字段，保证快照的一致性 */
     public Snapshot snapshot() {
         synchronized (lock) {
             return new Snapshot(x, y, z, yaw, pitch, onGround, horizontalCollision,
-                    velocityX, velocityY, velocityZ, sprinting);
+                    velocityX, velocityY, velocityZ, sprinting, fallFlying);
         }
     }
 
@@ -151,6 +177,6 @@ public final class BotState {
     public record Snapshot(double x, double y, double z, float yaw, float pitch,
                            boolean onGround, boolean horizontalCollision,
                            double velocityX, double velocityY, double velocityZ,
-                           boolean sprinting) {
+                           boolean sprinting, boolean fallFlying) {
     }
 }

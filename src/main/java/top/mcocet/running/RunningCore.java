@@ -98,6 +98,15 @@ public final class RunningCore {
         itemRegistry = ItemRegistry.loadDefault(new File(ITEM_TABLE_FILE));
         physics = new PlayerPhysics(botState, world, blockNames, entityTracker);
         physics.setAutoJumpEnabled(config.autoJump());
+        physics.setFallDamageEnabled(config.fallDamage());
+        // 鞘翅可滑翔门控：胸甲槽（内部槽 38）物品名为 elytra（对齐官方 canGlideUsing）
+        physics.setGliderEquippedSupplier(() ->
+                inventory.isEquipped(itemRegistry, top.mcocet.running.bot.ElytraFlightGoal.ELYTRA_ITEM_NAME));
+        // 危险下坠自动起滑救援（移植 MS ReconnectAirRecovery，物理层内建、不依赖移动目标）
+        physics.setAirRescueEnabled(config.flyAutoRescue());
+        // 强制飞行（旁路耐久预算）与耐久将尽自动换翅的运行时默认值（fly force / fly replace 可即时切换）
+        physics.setForceFlight(config.flyForceFlight());
+        physics.setAutoReplaceElytra(config.flyAutoReplace());
         movementEngine = new MovementEngine(botState, physics);
         pathExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "Running-Path-Compute");
@@ -117,7 +126,7 @@ public final class RunningCore {
         listeners.add(new EntityListener(botState, entityTracker));
         listeners.add(new PlayerListListener(playerList));
         listeners.add(new PositionListener(botState, movementEngine));
-        listeners.add(new KnockbackListener(botState, movementEngine));
+        listeners.add(new KnockbackListener(botState, movementEngine, config.knockback()));
         listeners.add(new WorldListener(world));
         listeners.add(new RespawnListener(botState));
         listeners.add(new InventoryListener(inventory));

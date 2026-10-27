@@ -52,6 +52,8 @@ public final class PathFinder {
     private final int startX;
     private final int startY;
     private final int startZ;
+    /** 回溯惩罚与避让区域（可为空） */
+    private final Favoring favoring;
 
     private final Map<Long, PathNode[]> cells = new HashMap<>();
     private PathNode[] prevCell;
@@ -63,11 +65,16 @@ public final class PathFinder {
     private volatile boolean cancelRequested;
 
     public PathFinder(PathWorld world, Goal goal, int startX, int startY, int startZ) {
+        this(world, goal, startX, startY, startZ, new Favoring());
+    }
+
+    public PathFinder(PathWorld world, Goal goal, int startX, int startY, int startZ, Favoring favoring) {
         this.world = world;
         this.goal = goal;
         this.startX = startX;
         this.startY = startY;
         this.startZ = startZ;
+        this.favoring = favoring != null ? favoring : new Favoring();
     }
 
     /** 请求中止当前计算（跨线程安全；下次 findPath 会重置该标志） */
@@ -193,6 +200,10 @@ public final class PathFinder {
                     throw new IllegalStateException(
                             moves + " 从 (" + currentNode.x + "," + currentNode.y + "," + currentNode.z
                                     + ") 计算出非法代价 " + actionCost);
+                }
+                // 回溯惩罚：若目标位置在 favoring 表中，则乘以惩罚系数
+                if (!favoring.isEmpty()) {
+                    actionCost *= favoring.calculate(res.x, res.y, res.z);
                 }
                 long hashCode = NodePos.longHash(res.x, res.y, res.z);
                 PathNode neighbor = getNodeAtPosition(res.x, res.y, res.z, hashCode);

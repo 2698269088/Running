@@ -1523,6 +1523,15 @@ public final class BlockNameTable {
         return fluidTypeByStateId[stateId];
     }
 
+    /**
+     * 该方块状态是否可被放置方块替换（对齐原版 {@code BlockState.canBeReplaced} 的简化：
+     * 空气与所有无碰撞形状的方块视为可替换——水/岩浆等流体、草/花/雪/火把/藤蔓等非固体）。
+     * 有碰撞的实心方块不可替换，搭桥时需先挖开再放置。
+     */
+    public boolean isReplaceable(int stateId) {
+        return stateId == 0 || isEmptyCollision(stateId);
+    }
+
     /** 查询流体量（1..8，对齐 FluidState.getAmount）；无流体为 0 */
     public int fluidAmount(int stateId) {
         if (stateId < 0 || stateId >= fluidAmountByStateId.length) return 0;

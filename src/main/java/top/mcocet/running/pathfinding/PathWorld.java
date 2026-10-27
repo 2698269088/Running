@@ -62,6 +62,36 @@ public interface PathWorld {
         return false;
     }
 
+    // ------------------------------------------------------------------
+    // 鞘翅滑翔查询（GLIDE 移动；默认全部关闭，由 RunningPathWorld 依据开关/装备返回）
+    // ------------------------------------------------------------------
+
+    /**
+     * 本次计算是否允许生成 GLIDE 移动（需配置开启且胸槽已装鞘翅，
+     * 由 {@link RunningPathWorld} 判定；还需 {@link #glideTable()} 非空）。
+     */
+    default boolean allowGlide() {
+        return false;
+    }
+
+    /**
+     * 滑翔弹道预计算表（{@link GlideTable#build} 按巡航俯仰角/自动补弹模型生成）；
+     * 不支持滑翔时为 {@code null}。
+     */
+    default GlideTable glideTable() {
+        return null;
+    }
+
+    /** 单次滑翔边最大水平跨度（格）。 */
+    default int glideMaxDistance() {
+        return 64;
+    }
+
+    /** 单次滑翔边预估火箭消耗上限（超出截断该边）。 */
+    default int glideRocketBudget() {
+        return 0;
+    }
+
     /**
      * 该格作为站立面时对“走一格”代价的乘子（&ge;1）：平地 / 普通固体为 1，
      * 灵魂沙等减速方块 {@code >1}。默认 1。
@@ -156,5 +186,56 @@ public interface PathWorld {
      */
     default PlaceTool planPlaceBlock() {
         return PlaceTool.none();
+    }
+
+    /**
+     * 该格是否可被放置方块替换（空气 / 水 / 岩浆 / 草 / 花等无碰撞方块）。默认仅空气，
+     * 由 {@link RunningPathWorld} 依据方块表返回。用于搭桥放置时判断目标格能否被直接覆盖，
+     * 不能替换时需先挖开再放置。
+     */
+    default boolean isReplaceable(int x, int y, int z) {
+        return stateAt(x, y, z) == AIR;
+    }
+
+    /**
+     * 该方块在朝向 {@code face}（{@code 0=北,1=南,2=西,3=东,4=下,5=上}，对齐
+     * {@code BlockNameTable.FACE_*}）的面上是否为完整面（可附着放置方块）。
+     * 默认 {@code false}，由 {@link RunningPathWorld} 依据方块表返回；用于放置搭桥时
+     * 排除楼梯/半砖等“有碰撞但面不完整”的方块，避免向斜面发送无效放置包。
+     */
+    default boolean isFaceSturdy(int x, int y, int z, int face) {
+        return false;
+    }
+
+    /**
+     * 该格是否为水（含水流/水源，不含岩浆）。默认 {@code false}，由 {@link RunningPathWorld}
+     * 依据方块表返回。用于游泳寻路时判定可通行水体。
+     */
+    default boolean isWater(int x, int y, int z) {
+        return false;
+    }
+
+    /**
+     * 该格是否为岩浆。默认 {@code false}，由 {@link RunningPathWorld} 依据方块表返回。
+     * 岩浆始终视为危险（不可通行/不可站立），但单独查询可用于特殊处理。
+     */
+    default boolean isLava(int x, int y, int z) {
+        return false;
+    }
+
+    /**
+     * 该列从 {@code y} 向上到水面是否均为水（含当前格）。用于判定“当前位置是否在水中”
+     * 以及“向上能否游出水面”。默认 {@code false}。
+     */
+    default boolean isWaterColumn(int x, int y, int z) {
+        return false;
+    }
+
+    /**
+     * 该列从 {@code y} 向上找到第一个非水格（空气/实心块），返回其 Y 坐标；
+     * 若到世界顶部仍为水则返回 {@code maxY+1}。用于判定水面位置。
+     */
+    default int waterSurfaceY(int x, int y, int z) {
+        return maxY() + 1;
     }
 }

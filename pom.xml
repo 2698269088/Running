@@ -6,7 +6,7 @@
 
     <groupId>top.mcocet</groupId>
     <artifactId>Running</artifactId>
-    <version>1.2.0</version>
+    <version>1.3.0</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -27,13 +27,6 @@
             <artifactId>xinbot</artifactId>
             <version>2.0.0-RELEASE</version>
             <scope>provided</scope>
-        </dependency>
-        <!-- 旧寻路系统(pathfinding/core|goals|utils、movement、RunCommandExecutor)使用 org.joml.Vector3d；
-             xinbot 及其传递依赖不含 joml，此处显式补齐以保证工程可编译(不改动旧代码)。 -->
-        <dependency>
-            <groupId>org.joml</groupId>
-            <artifactId>joml</artifactId>
-            <version>1.10.8</version>
         </dependency>
     </dependencies>
 

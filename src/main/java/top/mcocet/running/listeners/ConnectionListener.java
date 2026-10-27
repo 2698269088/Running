@@ -11,6 +11,7 @@ import org.geysermc.mcprotocollib.protocol.packet.common.serverbound.Serverbound
 import org.geysermc.mcprotocollib.protocol.packet.configuration.clientbound.ClientboundRegistryDataPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.ClientboundLoginPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.ClientboundRespawnPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.player.ClientboundPlayerAbilitiesPacket;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.mcocet.running.bot.BotState;
@@ -57,6 +58,8 @@ public final class ConnectionListener extends SessionAdapter {
 
     /** dimension_type 注册表条目（维度 id 即列表下标） */
     private volatile List<RegistryEntry> dimensionTypes;
+    /** 上次广播的能力模式（变化时才记日志，避免刷屏） */
+    private Boolean lastCreative;
 
     public ConnectionListener(BotState state, RunningWorld world) {
         this.state = state;
@@ -73,6 +76,23 @@ public final class ConnectionListener extends SessionAdapter {
             handleLogin(login);
         } else if (packet instanceof ClientboundRespawnPacket respawn) {
             handleRespawn(respawn);
+        } else if (packet instanceof ClientboundPlayerAbilitiesPacket abilities) {
+            handleAbilities(abilities);
+        }
+    }
+
+    /**
+     * 能力包：记录创造模式标志（对齐官方 handlePlayerAbilities 刷新 abilities）。
+     * 创造模式下服务器不扣物品/耐久，鞘翅飞行预算门控与自动换翅据此旁路。
+     */
+    private void handleAbilities(ClientboundPlayerAbilitiesPacket abilities) {
+        state.setCreative(abilities.isCreative());
+        Boolean last = lastCreative;
+        if (last == null || last != abilities.isCreative()) {
+            lastCreative = abilities.isCreative();
+            log.info("[Running] 游戏模式：{}（行走速度 {}）。",
+                    abilities.isCreative() ? "创造（鞘翅耐久不消耗）" : "生存/冒险",
+                    String.format("%.3f", abilities.getWalkSpeed()));
         }
     }
 

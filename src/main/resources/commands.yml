@@ -13,6 +13,11 @@ move:
   usage: "move <forward|back|left|right|jump|sprint|sneak|autojump|stop> [on|off]"
   aliases: ["mv"]
   executor: "top.mcocet.running.commands.MoveCommand"
+fly:
+  description: "鞘翅飞行（start 起滑/自动装备，to 飞向坐标，stop 着陆，boost 补烟花，force 强制飞行，replace 自动换翅，status 状态）"
+  usage: "fly <start [yaw pitch]|to <x> <z> [y]|stop|boost [n]|force [on|off]|replace [on|off]|status>"
+  aliases: ["glide", "elytra"]
+  executor: "top.mcocet.running.commands.FlyCommand"
 look:
   description: "调整机器人视角（yaw 偏航角 / pitch 俯仰角，度；~ 前缀表示相对）"
   usage: "look [<yaw> <pitch>]"

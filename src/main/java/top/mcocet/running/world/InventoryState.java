@@ -35,6 +35,8 @@ public final class InventoryState {
     /** 盔甲槽区间（36..39，顺序：脚/腿/胸/头） */
     public static final int ARMOR_FIRST = 36;
     public static final int ARMOR_LAST = 39;
+    /** 胸甲槽（鞘翅佩戴位置） */
+    public static final int ARMOR_CHEST = 38;
     /** 副手槽 */
     public static final int OFFHAND_SLOT = 40;
 
@@ -42,10 +44,26 @@ public final class InventoryState {
     private volatile int[] itemIds = new int[TOTAL];
     /** 每格的堆叠数量（id 为 0 时恒为 0） */
     private volatile int[] amounts = new int[TOTAL];
+    /** 每格的原始物品栈（含数据组件，供解析烟花飞行时长等；可为 null） */
+    private volatile ItemStack[] stacks = new ItemStack[TOTAL];
     /** 当前手持快捷栏槽（0..8） */
     private volatile int heldSlot;
     /** 最近一次服务器下发的玩家容器 stateId（容器点击需携带此值） */
     private volatile int stateId;
+    /** 诊断：最近一次"槽位内容回包触达"快照（来源包/槽/数量/时刻），
+     *  由 {@code InventoryListener} 在每个槽位更新处理时写入；供烟花消耗/换翅等
+     *  观测失败时区分"回包落错槽"与"回包未进入镜像" */
+    private volatile String lastSlotTouch = "（尚未收到任何槽位回包）";
+
+    /** 记录一次槽位回包触达（网络线程，低频轻量拼接）。 */
+    public void recordSlotTouch(int slot, String source, int amount) {
+        lastSlotTouch = source + " 槽=" + slot + " 数量=" + amount + " @" + System.currentTimeMillis();
+    }
+
+    /** 最近一次槽位回包触达快照（诊断用）。 */
+    public String lastSlotTouch() {
+        return lastSlotTouch;
+    }
 
     /** 设置某槽位的物品（itemStack 为 null 或 id<=0 视为清空）。 */
     public void setSlot(int slot, ItemStack itemStack) {
@@ -56,15 +74,18 @@ public final class InventoryState {
         int amount = (itemStack == null || id <= 0) ? 0 : itemStack.getAmount();
         int[] current = itemIds;
         int[] currentAmounts = amounts;
-        if (current[slot] == id && currentAmounts[slot] == amount) {
+        if (current[slot] == id && currentAmounts[slot] == amount && stacks[slot] == itemStack) {
             return;
         }
         int[] copy = current.clone();
         int[] amountCopy = currentAmounts.clone();
+        ItemStack[] stackCopy = stacks.clone();
         copy[slot] = id;
         amountCopy[slot] = amount;
+        stackCopy[slot] = id <= 0 ? null : itemStack;
         itemIds = copy;
         amounts = amountCopy;
+        stacks = stackCopy;
     }
 
     public void setSlot(int slot, int itemId) {
@@ -79,6 +100,7 @@ public final class InventoryState {
     public void setContent(ItemStack[] stacks) {
         int[] copy = new int[TOTAL];
         int[] amountCopy = new int[TOTAL];
+        ItemStack[] stackCopy = new ItemStack[TOTAL];
         int n = stacks == null ? 0 : Math.min(TOTAL, stacks.length);
         for (int i = 0; i < n; i++) {
             ItemStack stack = stacks[i];
@@ -87,9 +109,11 @@ public final class InventoryState {
             }
             copy[i] = stack.getId();
             amountCopy[i] = stack.getAmount();
+            stackCopy[i] = stack;
         }
         itemIds = copy;
         amounts = amountCopy;
+        this.stacks = stackCopy;
     }
 
     /** 整包替换 id（不改动数量语义，保留兼容；新代码应优先使用 {@link #setContent}）。 */
@@ -103,6 +127,7 @@ public final class InventoryState {
         }
         itemIds = copy;
         amounts = amountCopy;
+        stacks = new ItemStack[TOTAL];
     }
 
     public void setHeldSlot(int slot) {
@@ -128,6 +153,12 @@ public final class InventoryState {
     /** 该槽是否有物品。 */
     public boolean hasItem(int slot) {
         return itemIdAt(slot) > 0;
+    }
+
+    /** 指定槽位的原始物品栈（含数据组件）；空槽/越界返回 null。 */
+    public ItemStack stackAt(int slot) {
+        ItemStack[] current = stacks;
+        return (slot >= 0 && slot < current.length) ? current[slot] : null;
     }
 
     /** 最近一次记录的玩家容器 stateId。 */
@@ -195,11 +226,64 @@ public final class InventoryState {
         return -1;
     }
 
+    /** 胸甲槽是否为指定物品（默认实现拿鞘翅佩戴判定）。 */
+    public boolean isEquipped(ItemRegistry registry, String itemSimpleName) {
+        int id = itemIdAt(ARMOR_CHEST);
+        return id > 0 && itemSimpleName.equals(registry.itemName(id));
+    }
+
+    /**
+     * 在<b>主物品区（0..35）与副手（40）</b>中查找持有指定物品名的槽位，
+     * 数量多者优先（同数量取靠前的槽）；未找到返回 -1。
+     */
+    public int findSlotHoldingBest(ItemRegistry registry, String itemSimpleName) {
+        if (registry == null || !registry.isReady()) {
+            return -1;
+        }
+        int[] current = itemIds;
+        int[] currentAmounts = amounts;
+        int best = -1;
+        for (int slot = 0; slot < MAIN_SIZE; slot++) {
+            if (current[slot] > 0 && itemSimpleName.equals(registry.itemName(current[slot]))
+                    && (best < 0 || currentAmounts[slot] > currentAmounts[best])) {
+                best = slot;
+            }
+        }
+        int off = OFFHAND_SLOT;
+        if (current[off] > 0 && itemSimpleName.equals(registry.itemName(current[off]))
+                && (best < 0 || currentAmounts[off] > currentAmounts[best])) {
+            best = off;
+        }
+        return best;
+    }
+
+    /** 指定物品名在主物品区与副手的总持有数量（供状态展示）。 */
+    public int countItem(ItemRegistry registry, String itemSimpleName) {
+        if (registry == null || !registry.isReady()) {
+            return 0;
+        }
+        int[] current = itemIds;
+        int[] currentAmounts = amounts;
+        int total = 0;
+        for (int slot = 0; slot < MAIN_SIZE; slot++) {
+            if (current[slot] > 0 && itemSimpleName.equals(registry.itemName(current[slot]))) {
+                total += currentAmounts[slot];
+            }
+        }
+        int off = OFFHAND_SLOT;
+        if (current[off] > 0 && itemSimpleName.equals(registry.itemName(current[off]))) {
+            total += currentAmounts[off];
+        }
+        return total;
+    }
+
     public void clear() {
         itemIds = new int[TOTAL];
         amounts = new int[TOTAL];
+        stacks = new ItemStack[TOTAL];
         heldSlot = 0;
         stateId = 0;
+        lastSlotTouch = "（尚未收到任何槽位回包）";
     }
 
     @Override

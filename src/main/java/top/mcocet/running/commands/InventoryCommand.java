@@ -139,6 +139,8 @@ public final class InventoryCommand extends CommandExecutor {
         if (engine == null) return;
 
         boolean toHasItem = inventory.hasItem(to);
+        log.info("[Running] 已提交背包操作：槽 {} → 槽 {}{}。",
+                from, to, single ? "（单个）" : "");
         engine.setGoal(InventoryMoveGoal.move(inventory, from, to, single, toHasItem));
     }
 
@@ -168,6 +170,7 @@ public final class InventoryCommand extends CommandExecutor {
         MovementEngine engine = requireEngine(plugin);
         if (engine == null) return;
 
+        log.info("[Running] 已提交背包操作：槽 {} → 快捷栏 {}。", from, hotbar);
         engine.setGoal(InventoryMoveGoal.toHotbar(inventory, from, hotbar));
     }
 
@@ -192,6 +195,7 @@ public final class InventoryCommand extends CommandExecutor {
         MovementEngine engine = requireEngine(plugin);
         if (engine == null) return;
 
+        log.info("[Running] 已提交背包操作：槽 {} 快捷移动（整组）。", slot);
         engine.setGoal(InventoryMoveGoal.quickMove(inventory, slot));
     }
 

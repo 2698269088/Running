@@ -4,14 +4,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.mcocet.running.Main;
 import top.mcocet.running.RunningConfig;
+import top.mcocet.running.bot.ElytraFlightGoal;
 import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.PlayerPhysics;
+import top.mcocet.running.bot.RocketBooster;
+import top.mcocet.running.flight.ElytraDurability;
+import top.mcocet.running.pathfinding.GlideTable;
 import top.mcocet.running.pathfinding.Goal;
 import top.mcocet.running.pathfinding.GoalBlock;
 import top.mcocet.running.pathfinding.GoalFollow;
 import top.mcocet.running.pathfinding.GoalXZ;
 import top.mcocet.running.pathfinding.PathingGoal;
 import top.mcocet.running.pathfinding.RunningPathWorld;
+import top.mcocet.running.world.InventoryState;
 import xin.bbtt.mcbot.command.Command;
 import xin.bbtt.mcbot.command.CommandExecutor;
 
@@ -44,6 +49,12 @@ public final class GotoCommand extends CommandExecutor {
     private static final double FALLBACK_ARRIVE_RADIUS = RunningConfig.DEFAULT_ARRIVE_RADIUS;
     /** 默认最大坠落高度（仅配置不可用时兜底） */
     private static final int FALLBACK_MAX_FALL_HEIGHT = RunningConfig.DEFAULT_MAX_FALL_HEIGHT;
+    /** 默认直挖隧道总 tick 上限（仅配置不可用时兜底） */
+    private static final int FALLBACK_TUNNEL_MAX_TICKS = RunningConfig.DEFAULT_TUNNEL_MAX_TICKS;
+    /** 默认单缺口搭桥总 tick 预算（仅配置不可用时兜底） */
+    private static final int FALLBACK_BRIDGE_MAX_TICKS = RunningConfig.DEFAULT_BRIDGE_MAX_TICKS;
+    /** 默认同一缺口放置次数上限（仅配置不可用时兜底） */
+    private static final int FALLBACK_MAX_PLACE_TRIES = RunningConfig.DEFAULT_MAX_PLACE_TRIES;
     /** 跟随玩家时保持的水平间距（格，切比雪夫半径） */
     private static final int FOLLOW_KEEP_RADIUS = 2;
 
@@ -120,18 +131,66 @@ public final class GotoCommand extends CommandExecutor {
         boolean allowParkour = config != null ? config.allowParkour() : RunningConfig.DEFAULT_ALLOW_PARKOUR;
         int maxFallHeight = config != null ? config.maxFallHeight() : FALLBACK_MAX_FALL_HEIGHT;
         double arriveRadius = config != null ? config.arriveRadius() : FALLBACK_ARRIVE_RADIUS;
+        // 允许长时间放置方块的上限：直挖总时长 / 单缺口搭桥预算 / 同缺口放置次数
+        int tunnelMaxTicks = config != null ? config.tunnelMaxTicks() : FALLBACK_TUNNEL_MAX_TICKS;
+        int bridgeMaxTicks = config != null ? config.bridgeMaxTicks() : FALLBACK_BRIDGE_MAX_TICKS;
+        int maxPlaceTries = config != null ? config.maxPlaceTries() : FALLBACK_MAX_PLACE_TRIES;
+        // 水中行为优先级：swim=朝目标直接游过去（默认）/ shore=先找岸边
+        boolean waterSwimPriority = config != null ? config.waterSwimPriority() : true;
+
+        // 鞘翅滑翔：配置开启且胸槽已装鞘翅才生成 GLIDE 边；弹道表按巡航角/自动补弹
+        // 模型预计算（步行跳初速 0.4，保守低估射程），火箭预算受配置与实际持有量双重限制
+        boolean allowGlide = false;
+        GlideTable glideTable = null;
+        int glideMaxDistance = config != null ? config.glideMaxDistance() : 128;
+        int glideRocketBudget = 0;
+        float glidePitch = config != null ? config.flyGlidePitch() : RunningConfig.DEFAULT_FLY_GLIDE_PITCH;
+        double glideBoostMinSpeed = config != null
+                ? config.flyBoostMinSpeed() : RunningConfig.DEFAULT_FLY_BOOST_MIN_SPEED;
+        int rocketDuration = config != null
+                ? config.flyRocketDuration() : RunningConfig.DEFAULT_FLY_ROCKET_DURATION;
+        boolean glideConfigured = config != null
+                ? config.allowGlide() : RunningConfig.DEFAULT_ALLOW_GLIDE;
+        if (glideConfigured
+                && plugin.inventory().isEquipped(plugin.itemRegistry(), ElytraFlightGoal.ELYTRA_ITEM_NAME)) {
+            // 耐久预算门控（移植 MS shouldFly 的 ElytraDurability 判据）：目标坐标
+            // 可解析时按水平距离预算；跟随/其余目标距离不定，仅要求预算充裕（按 0 距判）
+            ElytraDurability durability = ElytraDurability
+                    .fromElytraStack(plugin.inventory().stackAt(InventoryState.ARMOR_CHEST));
+            double budgetDistance = 0.0;
+            if (goal instanceof GoalBlock gb) {
+                budgetDistance = Math.hypot(gb.x - startX, gb.z - startZ);
+            } else if (goal instanceof GoalXZ gx) {
+                budgetDistance = Math.hypot(gx.getX() - startX, gx.getZ() - startZ);
+            }
+            if (bypassDurability(physics, plugin) || durability.canStart(budgetDistance)) {
+                allowGlide = true;
+                int rocketsHeld = plugin.inventory().countItem(plugin.itemRegistry(), RocketBooster.ROCKET_ITEM_NAME);
+                int budgetCap = config != null ? config.glideRocketBudget() : RunningConfig.DEFAULT_GLIDE_ROCKET_BUDGET;
+                glideRocketBudget = Math.min(budgetCap, rocketsHeld);
+                glideTable = GlideTable.build(glidePitch, 0.4, glideBoostMinSpeed,
+                        10 * (rocketDuration + 1), glideRocketBudget,
+                        glideMaxDistance * 3 + 200, glideRocketBudget > 0);
+            } else {
+                log.info("[Running] 鞘翅耐久预算不足以覆盖本次航程，本轮寻路按纯步行规划（fly status 查看预算）。");
+            }
+        }
 
         RunningPathWorld world = new RunningPathWorld(
                 plugin.world(), plugin.blockNames(),
                 plugin.inventory().hotbarToolModels(plugin.itemRegistry()),
                 plugin.inventory(), plugin.itemRegistry(),
-                allowSprint, allowBreak, digPriority, allowPlace, allowParkour, maxFallHeight);
+                allowSprint, allowBreak, digPriority, allowPlace, allowParkour, maxFallHeight,
+                allowGlide, glideTable, glideMaxDistance, glideRocketBudget);
         if (!world.isLoaded(startX, startZ)) {
             log.info("[Running] 起点所在区块尚未加载，无法寻路。");
             return;
         }
 
         String modeLabel = digPriority ? "挖掘优先" : "移动优先";
+        if (allowGlide) {
+            modeLabel += "，允许滑翔";
+        }
         if (continuous) {
             log.info("[Running] 正在持续跟随玩家 {}（保持约 {} 格，模式：{}）...",
                     rest[1], FOLLOW_KEEP_RADIUS, modeLabel);
@@ -139,8 +198,15 @@ public final class GotoCommand extends CommandExecutor {
             log.info("[Running] 正在寻路到 {}（模式：{}）...", goal, modeLabel);
         }
         PathingGoal pathingGoal = new PathingGoal(goal, world, plugin.inventory(),
-                arriveRadius, plugin.pathExecutor(), continuous, stuckDig);
+                arriveRadius, plugin.pathExecutor(), continuous, stuckDig,
+                tunnelMaxTicks, bridgeMaxTicks, maxPlaceTries, waterSwimPriority,
+                plugin.itemRegistry(), glidePitch, glideBoostMinSpeed, rocketDuration);
         engine.setGoal(pathingGoal);
+    }
+
+    /** 耐久预算门控旁路：创造模式服务器不扣耐久；强制飞行（fly force）无视预算。 */
+    private static boolean bypassDurability(PlayerPhysics physics, Main plugin) {
+        return plugin.botState().isCreative() || physics.isForceFlight();
     }
 
     /** 解析目标；非法时输出用法并返回 null。 */

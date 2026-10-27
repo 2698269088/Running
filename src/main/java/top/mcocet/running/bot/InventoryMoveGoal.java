@@ -144,8 +144,8 @@ public final class InventoryMoveGoal implements MovementGoal {
             return;
         }
         if (stepIndex >= steps.size()) {
-            finished = true;
-            log.info("[Running] 背包操作完成：{}。", description);
+            finished = true; // 静默收尾：调用方（飞行/寻路/命令层）自行决定反馈，
+            // 自动补弹/取物高频场景下正常路径不记日志，失败由调用方报错
             return;
         }
 
@@ -174,8 +174,7 @@ public final class InventoryMoveGoal implements MovementGoal {
             awaitingAck = true;
             waitingTicks = 0;
         } else {
-            finished = true;
-            log.info("[Running] 背包操作已发出：{}。", description);
+            finished = true; // 静默：成功不记日志，失败由调用方按镜像/状态Id诊断
         }
     }
 
@@ -186,7 +185,7 @@ public final class InventoryMoveGoal implements MovementGoal {
 
     @Override
     public void onStart(MovementEngine engine) {
-        log.info("[Running] 开始背包操作：{}（共 {} 步点击）。", description, steps.size());
+        // 静默：自动补弹/取物/换翅每发都可能新建本目标，正常启动不记日志
     }
 
     @Override

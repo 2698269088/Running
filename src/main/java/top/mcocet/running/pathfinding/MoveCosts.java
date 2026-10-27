@@ -34,6 +34,18 @@ public final class MoveCosts {
     /** 落到新格后走满居中所需代价 */
     public static final double CENTER_AFTER_FALL_COST = WALK_ONE_BLOCK_COST - WALK_OFF_BLOCK_COST; // 0.927
 
+    /** 梯子/藤蔓向上爬一格 */
+    public static final double LADDER_UP_ONE_COST = WALK_ONE_BLOCK_COST * 1.5;
+    /** 梯子/藤蔓向下爬一格 */
+    public static final double LADDER_DOWN_ONE_COST = WALK_ONE_BLOCK_COST * 1.2;
+    /** 放置一个方块的代价（含切换物品与点击时间） */
+    public static final double PLACE_ONE_BLOCK_COST = 2.0;
+    /**
+     * 发射一枚烟花火箭的额外代价（选弹/换持/等待消耗确认，单位≈tick）；
+     * 滑翔弹道自身耗时由 {@link GlideTable} 逐 tick 累计计入。
+     */
+    public static final double ROCKET_ONE_COST = 5.0;
+
     /**
      * 灵魂沙上走一格（对齐 Baritone {@code WALK_ONE_OVER_SOUL_SAND_COST}）：
      * 原版 {@code speedFactor=0.4}，故耗时为平地的 {@code 1/0.4} 倍。

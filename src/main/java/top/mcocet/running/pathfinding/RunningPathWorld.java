@@ -33,6 +33,11 @@ public final class RunningPathWorld implements PathWorld {
     private final boolean allowPlace;
     private final boolean allowParkour;
     private final int maxFallHeight;
+    /** 鞘翅滑翔：开关（配置且已装鞘翅）与弹道表（null 表示不可用） */
+    private final boolean allowGlide;
+    private final GlideTable glideTable;
+    private final int glideMaxDistance;
+    private final int glideRocketBudget;
     /** 计算开始时从背包解析出的候选工具（已去重，不含徒手）；用于破块代价取最优 */
     private final List<ToolModel> candidateTools;
     /** 背包与物品表（可为 null）：用于执行时反查“该切哪把工具”的快捷槽 */
@@ -73,6 +78,17 @@ public final class RunningPathWorld implements PathWorld {
                             InventoryState inventory, ItemRegistry registry,
                             boolean allowSprint, boolean allowBreak, boolean digPriority,
                             boolean allowPlace, boolean allowParkour, int maxFallHeight) {
+        this(world, blocks, candidateTools, inventory, registry,
+                allowSprint, allowBreak, digPriority, allowPlace, allowParkour, maxFallHeight,
+                false, null, 64, 0);
+    }
+
+    public RunningPathWorld(RunningWorld world, BlockNameTable blocks, List<ToolModel> candidateTools,
+                            InventoryState inventory, ItemRegistry registry,
+                            boolean allowSprint, boolean allowBreak, boolean digPriority,
+                            boolean allowPlace, boolean allowParkour, int maxFallHeight,
+                            boolean allowGlide, GlideTable glideTable,
+                            int glideMaxDistance, int glideRocketBudget) {
         this.world = world;
         this.blocks = blocks;
         this.candidateTools = candidateTools != null ? List.copyOf(candidateTools) : List.of();
@@ -84,6 +100,10 @@ public final class RunningPathWorld implements PathWorld {
         this.allowPlace = allowPlace;
         this.allowParkour = allowParkour;
         this.maxFallHeight = Math.max(0, maxFallHeight);
+        this.allowGlide = allowGlide && glideTable != null && glideTable.profileSafe();
+        this.glideTable = glideTable;
+        this.glideMaxDistance = Math.max(16, glideMaxDistance);
+        this.glideRocketBudget = Math.max(0, glideRocketBudget);
     }
 
     @Override
@@ -115,8 +135,12 @@ public final class RunningPathWorld implements PathWorld {
         if (state == PathWorld.AIR) {
             return true;
         }
-        // 首版：流体不作为可通行空间（不涉水 / 不熔岩）
-        if (blocks.fluidType(state) != BlockNameTable.FLUID_NONE) {
+        // 水可通行（游泳）；岩浆不可通行（危险）
+        int fluid = blocks.fluidType(state);
+        if (fluid == BlockNameTable.FLUID_WATER) {
+            return true;
+        }
+        if (fluid == BlockNameTable.FLUID_LAVA) {
             return false;
         }
         if (isDangerous(state)) {
@@ -142,6 +166,48 @@ public final class RunningPathWorld implements PathWorld {
     }
 
     @Override
+    public boolean isWater(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED) {
+            return false;
+        }
+        return blocks.fluidType(state) == BlockNameTable.FLUID_WATER;
+    }
+
+    @Override
+    public boolean isLava(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED) {
+            return false;
+        }
+        return blocks.fluidType(state) == BlockNameTable.FLUID_LAVA;
+    }
+
+    @Override
+    public boolean isWaterColumn(int x, int y, int z) {
+        if (!isWater(x, y, z)) {
+            return false;
+        }
+        // 向上检查直到非水格或世界顶部
+        for (int cy = y + 1; cy <= maxY(); cy++) {
+            if (!isWater(x, cy, z)) {
+                return true; // 上方有非水格（空气/方块），当前位置在水中
+            }
+        }
+        return true; // 到世界顶部均为水（如深海）
+    }
+
+    @Override
+    public int waterSurfaceY(int x, int y, int z) {
+        for (int cy = y; cy <= maxY(); cy++) {
+            if (!isWater(x, cy, z)) {
+                return cy;
+            }
+        }
+        return maxY() + 1;
+    }
+
+    @Override
     public boolean allowSprint() {
         return allowSprint;
     }
@@ -149,6 +215,26 @@ public final class RunningPathWorld implements PathWorld {
     @Override
     public boolean allowParkour() {
         return allowParkour;
+    }
+
+    @Override
+    public boolean allowGlide() {
+        return allowGlide;
+    }
+
+    @Override
+    public GlideTable glideTable() {
+        return glideTable;
+    }
+
+    @Override
+    public int glideMaxDistance() {
+        return glideMaxDistance;
+    }
+
+    @Override
+    public int glideRocketBudget() {
+        return glideRocketBudget;
     }
 
     @Override
@@ -198,6 +284,24 @@ public final class RunningPathWorld implements PathWorld {
     @Override
     public boolean canPlace() {
         return allowPlace;
+    }
+
+    @Override
+    public boolean isReplaceable(int x, int y, int z) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED) {
+            return false;
+        }
+        return blocks.isReplaceable(state);
+    }
+
+    @Override
+    public boolean isFaceSturdy(int x, int y, int z, int face) {
+        int state = stateAt(x, y, z);
+        if (state == PathWorld.UNLOADED) {
+            return false;
+        }
+        return blocks.isFaceSturdy(state, face);
     }
 
     @Override

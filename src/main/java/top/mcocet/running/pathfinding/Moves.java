@@ -324,6 +324,266 @@ public enum Moves {
         public boolean isParkour() {
             return true;
         }
+    },
+
+    PILLAR(0, 1, 0) {
+        @Override
+        public void apply(PathWorld w, int x, int y, int z, MutableMoveResult res) {
+            pillar(w, x, y, z, res);
+        }
+
+        @Override
+        public boolean jumpUp() {
+            return true;
+        }
+
+        @Override
+        public boolean isPillar() {
+            return true;
+        }
+    },
+
+    BRIDGE_NORTH(0, 0, -1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return bridgeCost(w, x, y, z, x, z - 1);
+        }
+
+        @Override
+        public boolean isBridge() {
+            return true;
+        }
+    },
+
+    BRIDGE_SOUTH(0, 0, 1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return bridgeCost(w, x, y, z, x, z + 1);
+        }
+
+        @Override
+        public boolean isBridge() {
+            return true;
+        }
+    },
+
+    BRIDGE_EAST(1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return bridgeCost(w, x, y, z, x + 1, z);
+        }
+
+        @Override
+        public boolean isBridge() {
+            return true;
+        }
+    },
+
+    BRIDGE_WEST(-1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return bridgeCost(w, x, y, z, x - 1, z);
+        }
+
+        @Override
+        public boolean isBridge() {
+            return true;
+        }
+    },
+
+    SWIM_NORTH(0, 0, -1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimCost(w, x, y, z, x, z - 1);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_SOUTH(0, 0, 1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimCost(w, x, y, z, x, z + 1);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_EAST(1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimCost(w, x, y, z, x + 1, z);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_WEST(-1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimCost(w, x, y, z, x - 1, z);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_UP(0, 1, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimUpCost(w, x, y, z);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+
+        @Override
+        public boolean jumpUp() {
+            return true;
+        }
+    },
+
+    SWIM_DOWN(0, -1, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimDownCost(w, x, y, z);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_TO_SHORE_NORTH(0, 0, -1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimToShoreCost(w, x, y, z, x, z - 1);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_TO_SHORE_SOUTH(0, 0, 1) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimToShoreCost(w, x, y, z, x, z + 1);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_TO_SHORE_EAST(1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimToShoreCost(w, x, y, z, x + 1, z);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    SWIM_TO_SHORE_WEST(-1, 0, 0) {
+        @Override
+        public double cost(PathWorld w, int x, int y, int z) {
+            return swimToShoreCost(w, x, y, z, x - 1, z);
+        }
+
+        @Override
+        public boolean isSwim() {
+            return true;
+        }
+    },
+
+    // ---- 鞘翅滑翔（GLIDE）：名义偏移 ×8 仅用于区块边界预判，真实落点由弹道表扫描得出 ----
+
+    GLIDE_NORTH(0, -1, -8, true, true) {
+        @Override
+        public void apply(PathWorld w, int x, int y, int z, MutableMoveResult res) {
+            glide(w, x, y, z, 0, -1, res);
+        }
+
+        @Override
+        public boolean jumpUp() {
+            return true;
+        }
+
+        @Override
+        public boolean isGlide() {
+            return true;
+        }
+    },
+
+    GLIDE_SOUTH(0, -1, 8, true, true) {
+        @Override
+        public void apply(PathWorld w, int x, int y, int z, MutableMoveResult res) {
+            glide(w, x, y, z, 0, 1, res);
+        }
+
+        @Override
+        public boolean jumpUp() {
+            return true;
+        }
+
+        @Override
+        public boolean isGlide() {
+            return true;
+        }
+    },
+
+    GLIDE_EAST(8, -1, 0, true, true) {
+        @Override
+        public void apply(PathWorld w, int x, int y, int z, MutableMoveResult res) {
+            glide(w, x, y, z, 1, 0, res);
+        }
+
+        @Override
+        public boolean jumpUp() {
+            return true;
+        }
+
+        @Override
+        public boolean isGlide() {
+            return true;
+        }
+    },
+
+    GLIDE_WEST(-8, -1, 0, true, true) {
+        @Override
+        public void apply(PathWorld w, int x, int y, int z, MutableMoveResult res) {
+            glide(w, x, y, z, -1, 0, res);
+        }
+
+        @Override
+        public boolean jumpUp() {
+            return true;
+        }
+
+        @Override
+        public boolean isGlide() {
+            return true;
+        }
     };
 
     public final int xOffset;
@@ -377,6 +637,26 @@ public enum Moves {
 
     /** 本步是否为 Parkour 跳跨空隙（供 {@link PathingGoal} 进入多 tick 跳跃跟随状态机） */
     public boolean isParkour() {
+        return false;
+    }
+
+    /** 本步是否为原地向上搭建（供 {@link PathingGoal} 进入放置/攀爬逻辑） */
+    public boolean isPillar() {
+        return false;
+    }
+
+    /** 本步是否为放置方块搭桥（供 {@link PathingGoal} 先铺地板再走） */
+    public boolean isBridge() {
+        return false;
+    }
+
+    /** 本步是否为游泳（供 {@link PathingGoal} 进入游泳跟随逻辑） */
+    public boolean isSwim() {
+        return false;
+    }
+
+    /** 本步是否为鞘翅滑翔（供 {@link PathingGoal} 进入起滑/巡航/着陆状态机） */
+    public boolean isGlide() {
         return false;
     }
 
@@ -629,6 +909,184 @@ public enum Moves {
     }
 
     /**
+     * 原地向上搭建（对齐 Baritone {@code MovementPillar}）：
+     * 从当前位置向上移动一格，需要放置方块垫脚或利用梯子/藤蔓攀爬。
+     *
+     * <p>条件：</p>
+     * <ul>
+     *   <li>头顶两格（y+1, y+2）必须畅通；</li>
+     *   <li>若脚下是可攀爬方块（梯子/藤蔓），则直接向上爬；</li>
+     *   <li>否则需要放置方块垫脚（需 canPlace 开启且有可用方块）；</li>
+     *   <li>脚下不能是岩浆块等危险方块（除非允许）。</li>
+     * </ul>
+     */
+    private static void pillar(PathWorld w, int x, int y, int z, MutableMoveResult res) {
+        // 头顶两格必须畅通
+        if (!w.isLoadedAndPassable(x, y + 1, z) || !w.isLoadedAndPassable(x, y + 2, z)) {
+            return;
+        }
+        // 脚下不能是危险方块
+        if (w.isDangerousAt(x, y - 1, z)) {
+            return;
+        }
+        // 若脚下是可攀爬方块（梯子/藤蔓），则直接向上爬
+        if (w.isClimbable(x, y - 1, z)) {
+            res.x = x;
+            res.y = y + 1;
+            res.z = z;
+            res.cost = MoveCosts.LADDER_UP_ONE_COST;
+            return;
+        }
+        // 否则需要放置方块垫脚
+        if (!w.canPlace()) {
+            return;
+        }
+        // 脚下必须可站立（不能是空气）
+        if (!w.isLoadedAndStandable(x, y - 1, z)) {
+            return;
+        }
+        // 放置代价 + 跳跃代价
+        res.x = x;
+        res.y = y + 1;
+        res.z = z;
+        res.cost = MoveCosts.JUMP_ONE_BLOCK_COST + MoveCosts.PLACE_ONE_BLOCK_COST;
+    }
+
+    /**
+     * 放置搭桥（对齐 Baritone {@code MovementTraverse} 的 bridge 分支）：当 dest 脚下无站立面时，
+     * 用背包方块在 dest 脚下铺一块地板再走上去。前提：{@code canPlace()} 开启、dest 脚+头可通行、
+     * dest 脚下“可替换（空气/水/岩浆/草等）”或“不可替换但可挖”、存在放置锚点（dest 正下方 /
+     * 四横向相邻 / 起点脚下忍者桥）、出发点脚下可站立。不可替换的可挖方块先挖掉再放，挖块耗时
+     * 计入代价。代价 = 走一格 + {@link MoveCosts#PLACE_ONE_BLOCK_COST}（+ 挖块 tick）。
+     *
+     * <p>落点与 TRAVERSE 相同（{@code destX, y, destZ}），仅在 dest 脚下不可站时才有非
+     * {@link MoveCosts#COST_INF} 代价（此时 TRAVERSE 返回 COST_INF），两者互斥不产生重复节点。</p>
+     */
+    private static double bridgeCost(PathWorld w, int x, int y, int z, int destX, int destZ) {
+        if (!w.canPlace()) {
+            return MoveCosts.COST_INF;
+        }
+        // dest 脚 + 头可通行（走过去不撞墙）
+        if (!w.isLoadedAndPassable(destX, y, destZ) || !w.isLoadedAndPassable(destX, y + 1, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        // dest 脚下必须不可站（缺口）——否则普通 TRAVERSE 已覆盖，无需搭桥
+        if (w.isLoadedAndStandable(destX, y - 1, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        // 目标地板格分类：可替换（空气/水/岩浆/草等）→ 直接放；不可替换但可挖 → 挖掉再放；否则不可达
+        double extraCost = 0.0;
+        if (!w.isReplaceable(destX, y - 1, destZ)) {
+            if (!w.isBreakable(destX, y - 1, destZ)) {
+                return MoveCosts.COST_INF;
+            }
+            double c = w.breakCost(destX, y - 1, destZ);
+            if (c >= MoveCosts.COST_INF) {
+                return MoveCosts.COST_INF;
+            }
+            extraCost = c;
+        }
+        // 出发点脚下可站立（站得住才能放方块）
+        if (!w.isLoadedAndStandable(x, y - 1, z)) {
+            return MoveCosts.COST_INF;
+        }
+        // 存在放置锚点（与 PathingGoal#findPlaceAnchor 同一套三级锚点）
+        if (!hasPlaceAnchor(w, x, y, z, destX, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        return MoveCosts.WALK_ONE_BLOCK_COST + MoveCosts.PLACE_ONE_BLOCK_COST + extraCost;
+    }
+
+    /** 目标地板格 {@code (destX, y-1, destZ)} 是否存在可依附的放置锚点（UP 面 / 侧向 / 忍者桥）。 */
+    private static boolean hasPlaceAnchor(PathWorld w, int x, int y, int z, int destX, int destZ) {
+        // ① 目标正下方实心块 → 点其顶面（UP）
+        if (w.isLoadedAndStandable(destX, y - 2, destZ)) {
+            return true;
+        }
+        // ② 目标地板格四横向相邻实心块 → 点其侧面（跳过站立列，留作忍者桥）
+        int[][] offs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] o : offs) {
+            int ax = destX + o[0];
+            int az = destZ + o[1];
+            if (ax == x && az == z) {
+                continue;
+            }
+            if (w.isLoadedAndStandable(ax, y - 1, az)) {
+                return true;
+            }
+        }
+        // ③ 忍者桥：起点脚下实心块 → 点其侧面（潜行进边后可见）
+        return w.isLoadedAndStandable(x, y - 1, z);
+    }
+
+    /**
+     * 水中平游一格（对齐 Baritone {@code MovementTraverse} 的水分支）：dest 脚+头均为水，
+     * 且 dest 下方不是岩浆（防烫伤）。代价 = 走一格 × 水中减速（约 2 倍，对齐原版 0.8 水平衰减）。
+     *
+     * <p>若当前位置不在水中（如岸边），入水代价额外 ×3（避免非必要入水）；
+     * 若已在水中，则正常游泳代价（鼓励水中继续游泳而非上岸）。</p>
+     */
+    private static double swimCost(PathWorld w, int x, int y, int z, int destX, int destZ) {
+        // dest 脚 + 头均为水（可游泳通过）
+        if (!w.isWater(destX, y, destZ) || !w.isWater(destX, y + 1, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        // dest 下方不是岩浆（防烫伤；水下方块可以是任意可站立面或空气）
+        if (w.isLava(destX, y - 1, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        // 水中水平移动代价：走一格 × 2（对齐原版 0.8 水平衰减的倒数 1/0.8=1.25，取保守 2.0 覆盖加速与转向）
+        double cost = MoveCosts.WALK_ONE_BLOCK_COST * 2.0;
+        // 当前位置不在水中（如岸边）→ 入水代价额外 ×3（避免非必要入水）
+        if (!w.isWater(x, y, z)) {
+            cost *= 3.0;
+        }
+        return cost;
+    }
+
+    /**
+     * 水中向上浮一格（对齐原版 jumpInLiquid 上浮 0.04/tick）：dest 为水、头顶为水、
+     * 当前位置为水。代价 = 走一格 × 2.5（上浮比平游慢）。
+     */
+    private static double swimUpCost(PathWorld w, int x, int y, int z) {
+        if (!w.isWater(x, y, z) || !w.isWater(x, y + 1, z)) {
+            return MoveCosts.COST_INF;
+        }
+        return MoveCosts.WALK_ONE_BLOCK_COST * 2.5;
+    }
+
+    /**
+     * 水中向下沉一格（对齐原版 goDownInWater 下沉 0.04/tick）：dest 为水、当前位置为水。
+     * 代价 = 走一格 × 1.5（下沉比平游快，借助重力）。
+     */
+    private static double swimDownCost(PathWorld w, int x, int y, int z) {
+        if (!w.isWater(x, y, z) || !w.isWater(x, y - 1, z)) {
+            return MoveCosts.COST_INF;
+        }
+        return MoveCosts.WALK_ONE_BLOCK_COST * 1.5;
+    }
+
+    /**
+     * 水中向岸边移动一格：dest 是可站立的岸边（非水），当前位置在水中。
+     * 代价 = 走一格 × 2.5（出水阻力 + 上岸动作）。
+     */
+    private static double swimToShoreCost(PathWorld w, int x, int y, int z, int destX, int destZ) {
+        // 当前位置须在水中
+        if (!w.isWater(x, y, z)) {
+            return MoveCosts.COST_INF;
+        }
+        // dest 必须可站立（岸边）且非水
+        if (!w.isLoadedAndStandable(destX, y - 1, destZ) || w.isWater(destX, y, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        // dest 脚+头可通行（走上岸不撞墙）
+        if (!w.isLoadedAndPassable(destX, y, destZ) || !w.isLoadedAndPassable(destX, y + 1, destZ)) {
+            return MoveCosts.COST_INF;
+        }
+        return MoveCosts.WALK_ONE_BLOCK_COST * 2.5;
+    }
+
+    /**
      * 破块横向穿越：在 {@code canBreak()} 开启时，把目标列脚/头格中不可通行但可挖掘的方块
      * 视为“挖开后即可走”。代价 = 基础走格（含冲刺系数）+ 各需挖方块 {@code breakCost} 之和。
      * 脚下不可站、或脚/头任一格既不可通行又不可挖（如基岩/流体/未加载）→ {@link MoveCosts#COST_INF}。
@@ -703,5 +1161,87 @@ public enum Moves {
             }
         }
         // 落到世界底部仍未找到落脚点：不可达（可能是虚空）
+    }
+
+    /**
+     * 鞘翅滑翔边（本项目自建，对齐弹道表模型）：从 src 平台起跳离台后沿
+     * {@code (dirX, dirZ)} 方向按 {@link GlideTable} 采样弹道（脚点 = 起点脚高 − 累计下落，
+     * 水平距离每 0.5 格一采样）逐段前推：
+     * <ul>
+     *   <li>掠过的脚格必须可通行（滑翔碰撞盒高仅 0.6，保守按脚格判撞）；</li>
+     *   <li>首次踩到实心列时：若该顶面可站、其上两格畅通且不低于起点 → 着陆成功，
+     *       dest 为落脚点；否则判撞壁（不可行）；</li>
+     *   <li>离开已加载区/超出 {@code glideMaxDistance}/火箭超预算 → 截断为不可行
+     *       （跨区块续算由分段机制处理）；</li>
+     *   <li>水平跨度 &lt; 4 格不生成（交给 DESCEND/PARKOUR）。</li>
+     * </ul>
+     * 代价 = 弹道 tick 数 + 火箭数 × {@link MoveCosts#ROCKET_ONE_COST}。着陆免伤性由
+     * 表剖面保证（{@code profileSafe}：全程垂直速度浅于 −0.5，官方摔落距离封顶 1.0）。
+     */
+    private static void glide(PathWorld w, int x, int y, int z, int dirX, int dirZ, MutableMoveResult res) {
+        GlideTable table = w.glideTable();
+        if (!w.allowGlide() || table == null) {
+            return;
+        }
+        // src 必须站在实心平台上且头顶净空（能起跳离台）
+        if (!w.isLoadedAndStandable(x, y - 1, z) || !w.isLoadedAndPassable(x, y + 1, z)) {
+            return;
+        }
+        // 出射方向紧邻一格需畅通（跳离台面后不能立即撞壁）
+        int adjX = x + dirX;
+        int adjZ = z + dirZ;
+        if (!w.isLoadedAndPassable(adjX, y, adjZ) || !w.isLoadedAndPassable(adjX, y + 1, adjZ)) {
+            return;
+        }
+        double maxDist = Math.min(w.glideMaxDistance(), table.totalHoriz());
+        for (double d = 0.5; d <= maxDist; d += 0.5) {
+            double[] sample = table.sampleAtHoriz(d);
+            if (sample == null) {
+                return; // 弹道表耗尽
+            }
+            double footY = y - sample[1];
+            if (footY < w.minY()) {
+                return; // 落到世界底部以下（虚空）
+            }
+            int cx = floorCell(x + 0.5 + dirX * d);
+            int cz = floorCell(z + 0.5 + dirZ * d);
+            if (!w.isLoaded(cx, cz)) {
+                return; // 越出已加载区：保守截断，分段续算后自然衔接
+            }
+            int fy = floorCell(footY);
+            if (fy > y) {
+                return; // 弹道抬升到高于起点平台（仅大抬头角可能）：不考虑回踩上平台
+            }
+            if (w.isPassable(cx, fy, cz)) {
+                // 水不可作落点也不阻断掠过（保守：掠水继续往前找实心面）；
+                // 岩浆已在 isPassable 内判不可通行，撞上即失败
+                continue;
+            }
+            // 踩到实心列：必须作为平台顶面可站、其上两格可站人，否则判撞壁
+            if (!w.isStandable(cx, fy, cz)
+                    || !w.isLoadedAndPassable(cx, fy + 1, cz) || !w.isLoadedAndPassable(cx, fy + 2, cz)) {
+                return;
+            }
+            int destY = fy + 1;
+            int rockets = (int) sample[3];
+            if (rockets > w.glideRocketBudget()) {
+                return; // 补给超出预算
+            }
+            double span = Math.hypot(cx - x, cz - z);
+            if (span < 4.0) {
+                return; // 跨度过小不值得滑翔
+            }
+            res.x = cx;
+            res.y = destY;
+            res.z = cz;
+            res.cost = sample[4] + rockets * MoveCosts.ROCKET_ONE_COST;
+            return;
+        }
+        // 在最大跨度内未找到落脚点：不可行（继续飞行越界后交给分段）
+    }
+
+    /** 地板取整（与物理层 {@code MathHelper.floor} 同义）。 */
+    private static int floorCell(double value) {
+        return (int) Math.floor(value);
     }
 }

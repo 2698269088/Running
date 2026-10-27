@@ -9,9 +9,9 @@ import top.mcocet.running.bot.BlockActionGoal;
 import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.PlayerPhysics;
 import top.mcocet.running.pathfinding.MiningCalculator;
-import top.mcocet.running.pathfinding.MoveCosts;
 import top.mcocet.running.world.BlockNameTable;
 import top.mcocet.running.world.RunningWorld;
+import top.mcocet.running.world.item.ToolModel;
 import xin.bbtt.mcbot.command.Command;
 import xin.bbtt.mcbot.command.CommandExecutor;
 
@@ -22,8 +22,8 @@ import java.util.List;
  *
  * <p>用法：</p>
  * <ul>
- *   <li>{@code act dig <x> <y> <z>} —— 破坏该坐标的方块；按住时长按“徒手最慢模型”估算，
- *       只会偏慢不会偏快，故不触发 Grim {@code fastbreak}；</li>
+ *   <li>{@code act dig <x> <y> <z>} —— 破坏该坐标的方块；按住时长按<b>实际手持工具</b>的
+ *       每 tick 破坏进度累加，进度满即发 FINISH（对齐原版，不会提前也不会多按）；</li>
  *   <li>{@code act place <x> <y> <z>} —— 把当前手持物品放到该坐标（自动挑选一个相邻实心面点击）；</li>
  *   <li>{@code act stop} —— 取消当前正在进行的挖掘/放置。</li>
  * </ul>
@@ -103,19 +103,22 @@ public final class ActCommand extends CommandExecutor {
         float hardness = blocks.hardness(stateId);
         byte category = blocks.toolCategory(stateId);
         boolean requiresTool = blocks.requiresCorrectTool(stateId);
-        // 刻意以“徒手/无工具”估算耗时：这是最慢情况，实际若有工具只会更快，
-        // 因此我们永远“按住得比允许时间更久”，绝不触发 Grim fastbreak。
-        double ticks = MiningCalculator.breakTicks(null, name, category, hardness, requiresTool, true);
-        if (ticks >= MoveCosts.COST_INF) {
+        // 对齐原版客户端：按“实际手持工具”的每 tick 破坏进度估算（徒手时为基线 1.0）。
+        // 服务端用同一公式自主推进裂纹，进度满即发 FINISH，两者同步：
+        // 既不会比服务端允许得更快（fastbreak），也不会在裂纹已满后多按数秒才破块。
+        ToolModel heldTool = plugin.inventory().heldTool(plugin.itemRegistry());
+        double perTick = MiningCalculator.destroyProgress(heldTool, name, category, hardness, requiresTool, true);
+        if (perTick <= 0.0) {
             log.info("[Running] ({}, {}, {}) 无法估算破坏时间，已放弃。", x, y, z);
             return;
         }
-        int requiredTicks = (int) Math.ceil(ticks) + 1; // 额外 1 tick 安全余量
 
         Direction face = faceTowardPlayer(physics, x, y, z);
-        engine.setGoal(BlockActionGoal.dig(Vector3i.from(x, y, z), face, requiredTicks));
-        log.info("[Running] 正在挖掘 ({}, {}, {})（{}），预计按住约 {} tick（徒手模型）。",
-                x, y, z, nameOrId(blocks, stateId), requiredTicks);
+        engine.setGoal(BlockActionGoal.dig(Vector3i.from(x, y, z), face, perTick));
+        log.info("[Running] 正在挖掘 ({}, {}, {})（{}，手持 {}），预计约 {} tick。",
+                x, y, z, nameOrId(blocks, stateId),
+                heldTool != null ? String.valueOf(plugin.inventory().heldItemName(plugin.itemRegistry())) : "徒手",
+                (int) Math.ceil(1.0 / perTick));
     }
 
     private void doPlace(Main plugin, MovementEngine engine, String[] args) {

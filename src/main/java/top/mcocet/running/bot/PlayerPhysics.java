@@ -1,13 +1,18 @@
 package top.mcocet.running.bot;
 
+import top.mcocet.running.flight.FlightPhysics;
 import top.mcocet.running.math.AABB;
 import top.mcocet.running.math.Vec3;
 import top.mcocet.running.world.BlockNameTable;
 import top.mcocet.running.world.EntityTracker;
 import top.mcocet.running.world.RunningWorld;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 /**
  * 玩家刻物理模拟，逐行对齐 Minecraft 官方客户端实现。
@@ -35,16 +40,32 @@ import java.util.List;
  *   <li>{@code Entity.lerpMotion / setDeltaMovement / addDeltaMovement} —— 击退回写
  *       （自身速度包整体替换速度、爆炸 playerKnockback 叠加；非有限向量忽略）；</li>
  *   <li>{@code LivingEntity.pushEntities / Entity.push(Entity)} —— 被附近实体推挤
- *       （推方资格见 {@code EntitySizes.pushesLocalPlayer}，速度叠加公式逐行对齐）。</li>
+ *       （推方资格见 {@code EntitySizes.pushesLocalPlayer}，速度叠加公式逐行对齐）；</li>
+ *   <li>{@code LivingEntity.travelFallFlying / updateFallFlyingMovement /
+ *       Player.tryToStartFallFlying / LocalPlayer.aiStep 跳跃键起滑边沿 /
+ *       FireworkRocketEntity.tick 附着分支} —— 鞘翅滑翔（重力被俯仰余弦平方升力部分
+ *       抵消、下落转前推、抬头换抬升、0.99/0.98/0.99 衰减、canGlide 失败自动停滑、
+ *       摔落距离封顶 1.0）与烟花加速（look×0.1 + (look×1.5 − motion)×0.5 逐 tick 叠加）。</li>
+ *   <li>{@code FoodData / ServerPlayer.checkMovementStatistics / jumpFromGround} —— 饥饿与
+ *       饱和度消耗（疾跑 0.1/m、游泳与水下 0.01/m、行走/潜行 0、疾跑跳 0.2、普通跳 0.05；
+ *       exhaustion>4.0 先扣饱和再扣食物；饥饿药水每 tick 0.005×(amp+1)）；</li>
+ *   <li>{@code LivingEntity.getJumpPower / getEffectiveGravity / travelInAir / travelInWater}
+ *       —— 药水效果（跳跃提升 +0.1×(amp+1) 跳跃力与 +1/级 安全摔落高度、缓降下落重力
+ *       min(g,0.01)、漂浮 movementY 趋近 0.05×(amp+1)、海豚恩惠水中衰减 0.96、
+ *       速度/缓慢经 ADD_MULTIPLIED_TOTAL 作用于移动速度属性、失明禁用疾跑）；</li>
+ *   <li>{@code Entity.checkFallDamage / LivingEntity.causeFallDamage / calculateFallDamage}
+ *       —— 摔落伤害（下落累计、着地结算；伤害 = floor((fallDistance+1e-6 − 安全高度)
+ *       × 摔落乘数)，安全高度默认 3.0 且跳跃提升每级 +1；水/岩浆/缓降/漂浮时清零摔落距离）。</li>
  * </ul></p>
  *
  * <p>已知简化（相对于官方客户端）：
  * <ul>
- *   <li>不支持梯子/藤蔓攀爬、鞘翅飞行与药水效果（缓降/跳跃提升/失明）、骑乘；
- *       饥饿与失明影响通过可注入门控字段近似（默认允许疾跑）；</li>
+ *   <li>不支持梯子/藤蔓攀爬与骑乘；鞘翅滑翔已实现，但滑翔标志的启停采用本地
+ *       权威同构裁定（官方停滑由服务器同步共享标志位）；</li>
  *   <li>方块/流体形状按 {@link BlockNameTable} 的近似模型（完整立方体 / 半砖 /
  *       楼梯双盒 / 栅栏 1.5 / 流体高度与流量）；</li>
- *   <li>摔落距离仅用于潜行防走边的离地判定，不模拟摔落伤害。</li>
+ *   <li>摔落伤害为本地结算（仅日志与寻路高度决策参考），真实伤害由服务器裁定；
+ *       饥饿/饱和为本地镜像（进食与真实饱食度由服务器下发，本镜像用于疾跑门控）。</li>
  * </ul></p>
  *
  * <p>线程约定：物理状态仅由移动引擎线程推进；{@link #reset} 与击退回写
@@ -53,6 +74,7 @@ import java.util.List;
  * 把权威状态镜像到 {@link BotState} 供命令与控制台读取。</p>
  */
 public final class PlayerPhysics {
+    private static final Logger log = LoggerFactory.getLogger(PlayerPhysics.class.getSimpleName());
 
     // ------------------------------------------------------------------
     // 常量（对齐 MC Attributes / EntityType.PLAYER / LivingEntity）
@@ -145,6 +167,8 @@ public final class PlayerPhysics {
     public static final byte POSE_CROUCHING = 1;
     /** 姿势编码：游泳/匍匐（0.6×0.6，眼高 0.4） */
     public static final byte POSE_SWIMMING = 2;
+    /** 姿势编码：鞘翅滑翔（0.6×0.6，眼高 0.4，对齐 Pose.FALL_FLYING） */
+    public static final byte POSE_GLIDING = 3;
 
     /** 蹲伏碰撞盒高度（Avatar.POSES：CROUCHING） */
     public static final float CROUCHING_HEIGHT = 1.5F;
@@ -154,12 +178,94 @@ public final class PlayerPhysics {
     public static final float EYE_HEIGHT_CROUCHING = 1.27F;
     /** 游泳眼高（Avatar.POSES：SWIMMING） */
     public static final float EYE_HEIGHT_SWIMMING = 0.4F;
+    /** 滑翔碰撞盒高度（Avatar.POSES：FALL_FLYING，与游泳同尺寸） */
+    public static final float GLIDING_HEIGHT = 0.6F;
+    /** 滑翔眼高（Avatar.POSES：FALL_FLYING） */
+    public static final float EYE_HEIGHT_GLIDING = 0.4F;
+
+    // ---- 鞘翅滑翔（对齐 LivingEntity.travelFallFlying / updateFallFlyingMovement / Entity.checkFallDistanceAccumulation） ----
+    /** 滑翔水平衰减（updateFallFlyingMovement 末尾 multiply 的 0.99F） */
+    public static final double GLIDE_DRAG_XZ = (double) 0.99F;
+    /** 滑翔垂直衰减（同上 0.98F） */
+    public static final double GLIDE_DRAG_Y = (double) 0.98F;
+    /** 俯仰余弦平方升力系数（gravity × (−1 + cos²θ × 0.75) 中的 0.75） */
+    public static final double GLIDE_LIFT_FACTOR = 0.75;
+    /** 下落转视线前推系数（motion.y < 0 时按视线方向分摊的 −0.1） */
+    public static final double GLIDE_FALL_TO_FORWARD = -0.1;
+    /** 抬头（pitch < 0）前推损失系数（moveHor × |sin θ| × 0.04） */
+    public static final double GLIDE_PITCH_FORWARD_LOSS = 0.04;
+    /** 抬头前推损失的垂直分量转化倍数（× 3.2） */
+    public static final double GLIDE_PITCH_LIFT_MULTIPLIER = 3.2;
+    /** 水平速度向视线方向对齐的插值系数（0.1） */
+    public static final double GLIDE_YAW_ALIGN = 0.1;
+    /** 滑翔撞墙伤害：(lastH − newH) × 10 − 3（本地仅日志，真实结算在服务器） */
+    public static final double GLIDE_WALL_DAMAGE_SCALE = 10.0;
+    /** 滑翔撞墙伤害基数 */
+    public static final double GLIDE_WALL_DAMAGE_BASE = 3.0;
+    /** 滑翔中下落速度上限（checkFallDistanceAccumulation：ya > −0.5 时摔落距离封顶 1.0） */
+    public static final double GLIDE_FALL_SPEED_CAP = -0.5;
+    /** 滑翔中摔落距离封顶值 */
+    public static final double GLIDE_FALL_DISTANCE_CAP = 1.0;
+    /** 危险下坠自动救援阈值（格）：摔落距离超过即起滑（安全高度 3.0 留出余量） */
+    public static final double AIR_RESCUE_FALL_DISTANCE = 2.5;
+
+    // ---- 烟花加速（对齐 FireworkRocketEntity.tick 附着玩家分支） ----
+    /** 火箭沿视线固定推力（look × 0.1） */
+    public static final double ROCKET_FIXED_IMPULSE = 0.1;
+    /** 火箭视线目标速度倍数（look × 1.5） */
+    public static final double ROCKET_TARGET_SCALE = 1.5;
+    /** 火箭目标速度插值系数（(look×1.5 − motion) × 0.5） */
+    public static final double ROCKET_LERP = 0.5;
 
     /** 双击疾跑窗口（Options.sprintWindow 默认 7 tick） */
     public static final int SPRINT_WINDOW_TICKS = 7;
 
     /** 潜行防走边逐轴回退步长（Player.maybeBackOffFromEdge 的 0.05） */
     public static final double EDGE_BACKOFF_STEP = 0.05;
+
+    // ---- 饥饿与饱和（对齐 FoodData / FoodConstants / ServerPlayer.checkMovementStatistics） ----
+    /** 饥饿值上限（FoodConstants.MAX_FOOD） */
+    public static final int MAX_FOOD = 20;
+    /** 饱和度上限（FoodConstants.MAX_SATURATION） */
+    public static final float MAX_SATURATION = 20.0F;
+    /** 初始饱和度（FoodConstants.START_SATURATION） */
+    public static final float START_SATURATION = 5.0F;
+    /** 耗尽阈值（FoodConstants.EXHAUSTION_DROP）：超过后先扣饱和再扣食物 */
+    public static final float EXHAUSTION_DROP = 4.0F;
+    /** 疾跑每米消耗（EXHAUSTION_SPRINT / checkMovementStatistics SPRINT_ONE_CM） */
+    public static final float EXHAUSTION_SPRINT_PER_M = 0.1F;
+    /** 游泳/水下每米消耗（EXHAUSTION_SWIM / checkMovementStatistics SWIM/WALK_UNDER_WATER） */
+    public static final float EXHAUSTION_SWIM_PER_M = 0.01F;
+    /** 普通跳跃消耗（EXHAUSTION_JUMP / ServerPlayer.jumpFromGround 非疾跑） */
+    public static final float EXHAUSTION_JUMP = 0.05F;
+    /** 疾跑跳跃消耗（EXHAUSTION_SPRINT_JUMP / jumpFromGround 疾跑） */
+    public static final float EXHAUSTION_SPRINT_JUMP = 0.2F;
+    /** 疾跑所需最低食物等级（SPRINT_LEVEL，hasEnoughFood 严格大于） */
+    public static final int SPRINT_LEVEL = 6;
+    /** 饥饿药水每 tick 消耗（HungerMobEffect.applyEffectTick：0.005×(amp+1)） */
+    public static final float EXHAUSTION_HUNGER_EFFECT = 0.005F;
+
+    // ---- 摔落伤害与药水（对齐 LivingEntity.calculateFallDamage / getJumpPower / getEffectiveGravity） ----
+    /** 安全摔落高度默认值（Attributes.SAFE_FALL_DISTANCE 默认 3.0） */
+    public static final float SAFE_FALL_DISTANCE = 3.0F;
+    /** 摔落伤害乘数默认值（Attributes.FALL_DAMAGE_MULTIPLIER 默认 1.0） */
+    public static final float FALL_DAMAGE_MULTIPLIER = 1.0F;
+    /** 跳跃提升每级附加的安全摔落高度（MobEffects.JUMP_BOOST → SAFE_FALL_DISTANCE +1/级） */
+    public static final float JUMP_BOOST_SAFE_FALL = 1.0F;
+    /** 跳跃提升每级附加的跳跃力（LivingEntity.getJumpBoostPower：0.1×(amp+1)） */
+    public static final float JUMP_BOOST_POWER = 0.1F;
+    /** 缓降下落重力上限（LivingEntity.getEffectiveGravity：min(gravity, 0.01)） */
+    public static final double SLOW_FALL_GRAVITY = 0.01;
+    /** 漂浮每级目标上升速度（travelInAir：0.05×(amp+1)） */
+    public static final double LEVITATION_RATE = 0.05;
+    /** 漂浮趋近速率（travelInAir：×0.2） */
+    public static final double LEVITATION_LERP = 0.2;
+    /** 海豚恩惠水中水平衰减（travelInWater：slowDown = 0.96） */
+    public static final float DOLPHINS_GRACE_SLOW_DOWN = 0.96F;
+    /** 速度药水每级乘算修饰（MobEffects.SPEED → MOVEMENT_SPEED ADD_MULTIPLIED_TOTAL +0.2/级） */
+    public static final float SPEED_EFFECT_PER_LEVEL = 0.2F;
+    /** 缓慢药水每级乘算修饰（MobEffects.SLOWNESS → MOVEMENT_SPEED ADD_MULTIPLIED_TOTAL −0.15/级） */
+    public static final float SLOWNESS_EFFECT_PER_LEVEL = -0.15F;
 
     /** 水平四向 X 步长（顺序 N,E,S,W，对齐 Direction.Plane.HORIZONTAL） */
     private static final int[] HORIZONTAL_STEP_X = {0, 1, 0, -1};
@@ -210,6 +316,28 @@ public final class PlayerPhysics {
     private int autoJumpTime;
     /** 本 tick 是否注入了自动跳跃（供引擎对齐官方 makeJump 后的输入帧发送） */
     private boolean autoJumpInjected;
+
+    /** 本地权威鞘翅滑翔标志（对齐 Entity 共享标志位 7：FallFlying） */
+    private boolean fallFlying;
+    /** 本 tick 是否刚起滑（供引擎发送 START_ELYTRA_FLYING 包，读取后清除） */
+    private boolean glideStartPending;
+    /** 上一 tick 输入帧的 jump 键（LocalPlayer.wasJumping，起滑需按键边沿） */
+    private boolean lastKeyJump;
+    /** 火箭加速剩余 tick 窗口（> 0 时每 tick 按官方公式叠加视线冲量） */
+    private int rocketBoostTicks;
+    /** 程序化起滑请求闭锁（对齐 MS ElytraTakeoffMovement：起跳离地后 vy≤0 即时起滑，
+     *  无需第二次跳跃边沿；由 {@link #requestAirborneGlide()} 置位，tick 内消费） */
+    private boolean glideRequestLatch;
+    /** 危险下坠自动救援开关（{@code fly.auto-rescue}，默认开启）：离地且摔落距离达到
+     *  危险阈值、已装鞘翅时自动起滑（移植 MS ReconnectAirRecovery，不依赖任何移动目标） */
+    private volatile boolean airRescueEnabled = true;
+    /** 强制飞行开关（{@code fly.force}）：旁路鞘翅耐久预算门控与迫降判定；
+     *  创造模式下服务器本就不扣耐久，该开关仅对生存/冒险有意义 */
+    private volatile boolean forceFlight;
+    /** 耐久将尽时自动从背包更换新鞘翅（{@code fly.auto-replace}） */
+    private volatile boolean autoReplaceElytra = true;
+    /** 可滑翔装备门控（胸槽是否为鞘翅；由 RunningCore 接线到背包镜像，默认不可滑翔） */
+    private volatile BooleanSupplier gliderEquipped = () -> false;
 
     /** 本 tick 输入向量（对齐 Entity.xxa/zza：左侧为正、前侧为正） */
     private double xxa;
@@ -266,12 +394,41 @@ public final class PlayerPhysics {
     private boolean lastKeyShift;
     /** 上一 tick 输入帧是否有前进冲量（hasForwardImpulse） */
     private boolean lastHasForwardImpulse;
-    /** 摔落距离（对齐 Entity.fallDistance，仅用于潜行防走边的 isAboveGround 判定） */
+    /** 摔落距离（对齐 Entity.fallDistance；下落累计、着地结算） */
     private double fallDistance;
 
-    /** 是否可进行剧烈运动（对应 hasEnoughFoodToDoExhaustiveManoeuvres；机器人无饥饿数据） */
+    // ---- 饥饿与饱和（本地镜像，对齐 FoodData；进食与真实值由服务器下发） ----
+    /** 食物等级（0..20） */
+    private int foodLevel = MAX_FOOD;
+    /** 饱和度（0..foodLevel） */
+    private float saturationLevel = START_SATURATION;
+    /** 消耗累计（exhaustionLevel，>4.0 时先扣饱和再扣食物） */
+    private float exhaustionLevel;
+
+    // ---- 药水效果放大器（-1 = 无；由服务器实体效果包注入，网络线程写、引擎线程读） ----
+    /** 速度（SPEED）放大器 */
+    private volatile int speedAmplifier = -1;
+    /** 缓慢（SLOWNESS）放大器 */
+    private volatile int slownessAmplifier = -1;
+    /** 跳跃提升（JUMP_BOOST）放大器 */
+    private volatile int jumpBoostAmplifier = -1;
+    /** 缓降（SLOW_FALLING）放大器 */
+    private volatile int slowFallingAmplifier = -1;
+    /** 漂浮（LEVITATION）放大器 */
+    private volatile int levitationAmplifier = -1;
+    /** 失明（BLINDNESS）放大器 */
+    private volatile int blindnessAmplifier = -1;
+    /** 海豚恩惠（DOLPHINS_GRACE）放大器 */
+    private volatile int dolphinsGraceAmplifier = -1;
+    /** 饥饿（HUNGER）放大器 */
+    private volatile int hungerAmplifier = -1;
+
+    /** 摔落伤害开关（{@code physics.fall-damage}，默认开启；关闭时不结算摔落伤害） */
+    private volatile boolean fallDamageEnabled = true;
+
+    /** 是否可进行剧烈运动（对应 hasEnoughFoodToDoExhaustiveManoeuvres；由本地饥饿镜像驱动） */
     private boolean canDoExhaustiveManoeuvres = true;
-    /** 移动是否受限（对应 BLINDNESS 效果；机器人无药水数据） */
+    /** 移动是否受限（对应 BLINDNESS 效果；由 blindnessAmplifier 驱动） */
     private boolean mobilityRestricted;
 
     public PlayerPhysics(BotState state, RunningWorld world, BlockNameTable blockNames,
@@ -354,6 +511,87 @@ public final class PlayerPhysics {
         return sprinting;
     }
 
+    /** 是否处于鞘翅滑翔状态（本地权威标志，对齐 Entity 共享标志位 7） */
+    public synchronized boolean isFallFlying() {
+        return fallFlying;
+    }
+
+    /** 读取并清除“本 tick 刚起滑”标志（引擎据此发送 START_ELYTRA_FLYING 包） */
+    public synchronized boolean consumeGlideStartPending() {
+        boolean pending = glideStartPending;
+        glideStartPending = false;
+        return pending;
+    }
+
+    /**
+     * 能否起滑（对齐 Player.tryToStartFallFlying 的前置判定：未在滑翔、可滑翔
+     * 且不在水中），供目标层决定何时补按跳跃键。
+     */
+    public synchronized boolean canStartGlide() {
+        return !fallFlying && canGlide() && !isInWater();
+    }
+
+    /** 设置可滑翔装备门控（胸槽是否为鞘翅；网络/命令线程写入，引擎 tick 读取） */
+    public void setGliderEquippedSupplier(BooleanSupplier supplier) {
+        this.gliderEquipped = supplier != null ? supplier : () -> false;
+    }
+
+    /**
+     * 施加火箭加速窗口（由烟花发射经服务器确认后调用，网络/引擎线程均可）：
+     * 取 max 而非累加（对齐官方：同一时刻只挂一枚火箭）。
+     *
+     * @param ticks 加速持续 tick 数（≈ (flight_duration + 1) × 10）
+     */
+    public synchronized void applyRocketBoost(int ticks) {
+        if (ticks > 0) {
+            rocketBoostTicks = Math.max(rocketBoostTicks, ticks);
+        }
+    }
+
+    /** 火箭加速剩余 tick 窗口（供命令/日志查询） */
+    public synchronized int rocketBoostRemaining() {
+        return rocketBoostTicks;
+    }
+
+    /**
+     * 请求程序化起滑（移植 MS {@code ElytraTakeoffMovement.tickTakeoff}）：置位后
+     * 在引擎 tick 内等待"离地且下落（vy≤0）"窗口即时生效，无需模拟第二次
+     * 跳跃键边沿；目标层超时未观察到滑翔时应 {@link #cancelGlideRequest()} 撤销。
+     */
+    public synchronized void requestAirborneGlide() {
+        glideRequestLatch = true;
+    }
+
+    /** 撤销未消费的起滑请求（目标层超时/失败时调用）。 */
+    public synchronized void cancelGlideRequest() {
+        glideRequestLatch = false;
+    }
+
+    /** 设置危险下坠自动救援开关（{@code fly.auto-rescue}；命令/装配线程写，引擎 tick 读）。 */
+    public void setAirRescueEnabled(boolean value) {
+        this.airRescueEnabled = value;
+    }
+
+    /** 设置强制飞行开关（{@code fly.force}；命令线程写，飞行目标读）。 */
+    public void setForceFlight(boolean value) {
+        this.forceFlight = value;
+    }
+
+    /** 强制飞行是否开启（耐久预算门控/迫降判定旁路）。 */
+    public boolean isForceFlight() {
+        return forceFlight;
+    }
+
+    /** 设置耐久将尽时自动换翅开关（{@code fly.replace}；命令线程写，飞行目标读）。 */
+    public void setAutoReplaceElytra(boolean value) {
+        this.autoReplaceElytra = value;
+    }
+
+    /** 自动换翅是否开启。 */
+    public boolean isAutoReplaceElytra() {
+        return autoReplaceElytra;
+    }
+
     // ------------------------------------------------------------------
     // 外部写入
     // ------------------------------------------------------------------
@@ -434,6 +672,65 @@ public final class PlayerPhysics {
     }
 
     // ------------------------------------------------------------------
+    // 外部写入：药水效果与配置开关（网络/装配线程调用）
+    // ------------------------------------------------------------------
+
+    /** 设置速度（SPEED）药水放大器；-1 表示无效果 */
+    public void setSpeedAmplifier(int amplifier) {
+        this.speedAmplifier = amplifier;
+    }
+
+    /** 设置缓慢（SLOWNESS）药水放大器；-1 表示无效果 */
+    public void setSlownessAmplifier(int amplifier) {
+        this.slownessAmplifier = amplifier;
+    }
+
+    /** 设置跳跃提升（JUMP_BOOST）药水放大器；-1 表示无效果 */
+    public void setJumpBoostAmplifier(int amplifier) {
+        this.jumpBoostAmplifier = amplifier;
+    }
+
+    /** 设置缓降（SLOW_FALLING）药水放大器；-1 表示无效果 */
+    public void setSlowFallingAmplifier(int amplifier) {
+        this.slowFallingAmplifier = amplifier;
+    }
+
+    /** 设置漂浮（LEVITATION）药水放大器；-1 表示无效果 */
+    public void setLevitationAmplifier(int amplifier) {
+        this.levitationAmplifier = amplifier;
+    }
+
+    /** 设置失明（BLINDNESS）药水放大器；-1 表示无效果 */
+    public void setBlindnessAmplifier(int amplifier) {
+        this.blindnessAmplifier = amplifier;
+    }
+
+    /** 设置海豚恩惠（DOLPHINS_GRACE）药水放大器；-1 表示无效果 */
+    public void setDolphinsGraceAmplifier(int amplifier) {
+        this.dolphinsGraceAmplifier = amplifier;
+    }
+
+    /** 设置饥饿（HUNGER）药水放大器；-1 表示无效果 */
+    public void setHungerAmplifier(int amplifier) {
+        this.hungerAmplifier = amplifier;
+    }
+
+    /** 设置摔落伤害开关（{@code physics.fall-damage}） */
+    public void setFallDamageEnabled(boolean value) {
+        this.fallDamageEnabled = value;
+    }
+
+    /** 当前食物等级（本地镜像，供命令/日志查询） */
+    public synchronized int foodLevel() {
+        return foodLevel;
+    }
+
+    /** 当前饱和度（本地镜像） */
+    public synchronized float saturationLevel() {
+        return saturationLevel;
+    }
+
+    // ------------------------------------------------------------------
     // tick 主流程（对齐 LivingEntity.aiStep 的顺序）
     // ------------------------------------------------------------------
 
@@ -472,6 +769,16 @@ public final class PlayerPhysics {
         // baseTick 末尾：清除首 tick 标志（首 tick 内 isInLava 恒 false、入水不触发水花）
         firstTick = false;
 
+        // (3c) 饥饿镜像与疾跑门控（FoodData.tick + hasEnoughFoodToDoExhaustiveManoeuvres）
+        tickFood();
+        canDoExhaustiveManoeuvres = foodLevel > SPRINT_LEVEL;
+        mobilityRestricted = blindnessAmplifier >= 0;
+
+        // (3d) 缓降/漂浮时清零摔落距离（LivingEntity.aiStep：hasEffect(SLOW_FALLING/LEVITATION) → resetFallDistance）
+        if (slowFallingAmplifier >= 0 || levitationAmplifier >= 0) {
+            fallDistance = 0.0;
+        }
+
         // (4) 蹲伏平面判定（LocalPlayer.aiStep：input.tick 之前执行，读取上一 tick 输入帧）
         boolean lastShift = lastKeyShift;
         boolean lastForwardImpulse = lastHasForwardImpulse;
@@ -497,6 +804,15 @@ public final class PlayerPhysics {
 
         // (7) 冲刺状态机（LocalPlayer.aiStep：触发窗口 → 开始 → 停止）
         updateSprinting(input, lastShift, lastForwardImpulse);
+
+        // (7b) 鞘翅起滑（LocalPlayer.aiStep：跳跃键边沿且非攀爬且 tryToStartFallFlying
+        //      成功→本地置位并发 START_FALL_FLYING 包；官方在地面无法起滑，canGlide
+        //      要求离地，因此需先跳起再补一次跳跃边沿）
+        boolean jumpEdge = input.jump() && !lastKeyJump;
+        if (jumpEdge && !onClimbable() && tryToStartFallFlying()) {
+            glideStartPending = true;
+        }
+        lastKeyJump = input.jump();
 
         // (8) 水中下潜（LocalPlayer.aiStep：isInWater && shift && isAffectedByFluids）
         if (touchingWater && input.shift() && isAffectedByFluids()) {
@@ -525,10 +841,51 @@ public final class PlayerPhysics {
         // (12) 跳跃段（LivingEntity.aiStep：流体/地面分支；含自动跳跃注入）
         handleJump(input.jump() || autoJumping);
 
-        // (13) 行进分派（travel：流体优先，否则空中）
+        // (12a) 程序化起滑请求消费（移植 MS 起飞方式：起跳离地后 vy≤0 即时起滑，
+        //       无需第二次跳跃键边沿；条件不成立则丢弃请求，由目标层超时重试）
+        if (glideRequestLatch && !fallFlying && !onGround && deltaY <= 0.0) {
+            if (canGlide() && !isInWater()) {
+                fallFlying = true;
+                glideStartPending = true;
+            }
+            glideRequestLatch = false;
+        }
+
+        // (12a2) 危险下坠自动救援（移植 MS ReconnectAirRecovery，不依赖任何移动目标）：
+        //        登录/传送/击退后高处坠亡前起滑；起滑后摔落距离被官方封顶 1.0，落地免伤
+        if (airRescueEnabled && !fallFlying && !glideRequestLatch
+                && !onGround && deltaY < 0.0 && fallDistance >= AIR_RESCUE_FALL_DISTANCE
+                && canGlide() && !isInWater()) {
+            fallFlying = true;
+            glideStartPending = true;
+            log.info("[Running] 危险下坠（{} 格），已自动起滑救援。",
+                    String.format("%.1f", fallDistance));
+        }
+
+        // (12b) 滑翔维护（LivingEntity.aiStep：travel 前 updateFallFlying：摔落距离
+        //       封顶 + canGlide 失败自动停滑；官方停滑由服务器同步标志，本实现
+        //       同 tick 应用同一套 canGlide 谓词，与服务器裁定一致）
+        if (fallFlying) {
+            updateFallFlying();
+        }
+
+        // (12c) 火箭加速（FireworkRocketEntity.tick 附着分支：仅滑翔中逐 tick 叠加
+        //       视线冲量；窗口随火箭寿命递减，无论是否仍在滑翔）
+        if (rocketBoostTicks > 0) {
+            if (fallFlying) {
+                applyRocketImpulse();
+            }
+            rocketBoostTicks--;
+        }
+
+        // (13) 行进分派（travel：流体优先，其次滑翔，否则空中）
         double prevX = x;
+        double prevY = y;
         double prevZ = z;
         travel(this.xxa, this.zza);
+
+        // (13b) 移动消耗（ServerPlayer.checkMovementStatistics：按本 tick 实际位移计费）
+        addMovementExhaustion(x - prevX, y - prevY, z - prevZ);
 
         // (14) 方块效果（applyEffectsFromBlocks：着地时脚下方块的 stepOn，如粘液块减速）
         applyStepOnEffects();
@@ -548,8 +905,53 @@ public final class PlayerPhysics {
     }
 
     // ------------------------------------------------------------------
-    // 内部：实体推挤（LivingEntity.pushEntities 的接收方向）
+    // 内部：饥饿与饱和（对齐 FoodData / ServerPlayer.checkMovementStatistics）
     // ------------------------------------------------------------------
+
+    /**
+     * 对齐 FoodData.tick：exhaustionLevel > 4.0 时先扣饱和度（每级 −1），
+     * 饱和耗尽后扣食物等级（非和平难度）；饥饿药水每 tick 追加 0.005×(amp+1) 消耗。
+     */
+    private void tickFood() {
+        if (hungerAmplifier >= 0) {
+            addExhaustion(EXHAUSTION_HUNGER_EFFECT * (hungerAmplifier + 1));
+        }
+        if (exhaustionLevel > EXHAUSTION_DROP) {
+            exhaustionLevel -= EXHAUSTION_DROP;
+            if (saturationLevel > 0.0F) {
+                saturationLevel = Math.max(saturationLevel - 1.0F, 0.0F);
+            } else {
+                foodLevel = Math.max(foodLevel - 1, 0);
+            }
+        }
+    }
+
+    /** 对齐 FoodData.addExhaustion：累加消耗（上限 40） */
+    private void addExhaustion(float amount) {
+        exhaustionLevel = Math.min(exhaustionLevel + amount, 40.0F);
+    }
+
+    /**
+     * 对齐 ServerPlayer.checkMovementStatistics：按本 tick 实际位移计移动消耗。
+     * 疾跑 0.1/m、游泳/水下 0.01/m、行走/潜行/攀爬/飞行 0；滑翔无消耗
+     * （官方仅计 ELYTRA 统计项，不追加 exhaustion）。
+     */
+    private void addMovementExhaustion(double dx, double dy, double dz) {
+        if (fallFlying) {
+            return;
+        }
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+        if (swimming || eyeInWater) {
+            double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > 0.0) {
+                addExhaustion(EXHAUSTION_SWIM_PER_M * (float) dist);
+            }
+        } else if (onGround) {
+            if (horizontal > 0.0 && sprinting) {
+                addExhaustion(EXHAUSTION_SPRINT_PER_M * (float) horizontal);
+            }
+        }
+    }
 
     /**
      * 被附近实体推挤：对齐官方客户端 {@code LivingEntity.aiStep 末尾 → pushEntities
@@ -639,10 +1041,12 @@ public final class PlayerPhysics {
 
     /**
      * 对齐 LocalPlayer.canStartSprinting：未在冲刺、有前进冲量、允许疾跑
-     * 且（未缓行或在水下）；无鞘翅/物品使用场景为恒真项。
+     * 且（未滑翔或在水下，对齐 L1104 的 !isFallFlying || isUnderWater）
+     * 且（未缓行或在水下）；物品使用场景为恒真项。
      */
     private boolean canStartSprinting(PlayerInput input) {
         return !sprinting && input.hasForwardImpulse() && isSprintingPossible(false)
+                && (!fallFlying || isUnderWater())
                 && (!isMovingSlowly() || isUnderWater());
     }
 
@@ -720,6 +1124,7 @@ public final class PlayerPhysics {
     /**
      * 对齐 LivingEntity.jumpFromGround：y = max(getJumpPower, 当前y)，
      * 跳跃力不足（≤ 1E-5）时不跳；冲刺附加前向 0.2 动量。
+     * 起跳后按 ServerPlayer.jumpFromGround 追加饥饿消耗（疾跑 0.2 / 普通 0.05）。
      */
     private void jumpFromGround() {
         float jumpPower = getJumpPower();
@@ -731,12 +1136,21 @@ public final class PlayerPhysics {
                 deltaX += (double) (-(float) Math.sin((double) angle)) * SPRINT_JUMP_BOOST;
                 deltaZ += (double) ((float) Math.cos((double) angle)) * SPRINT_JUMP_BOOST;
             }
+            addExhaustion(sprinting ? EXHAUSTION_SPRINT_JUMP : EXHAUSTION_JUMP);
         }
     }
 
-    /** 对齐 LivingEntity.getJumpPower：JUMP_STRENGTH × 方块跳跃因子（无跳跃提升药水） */
+    /**
+     * 对齐 LivingEntity.getJumpPower：JUMP_STRENGTH × 方块跳跃因子 + 跳跃提升加成
+     * （getJumpBoostPower：0.1×(amp+1)，无效果时为 0）。
+     */
     private float getJumpPower() {
-        return JUMP_STRENGTH * getBlockJumpFactor();
+        return JUMP_STRENGTH * getBlockJumpFactor() + getJumpBoostPower();
+    }
+
+    /** 对齐 LivingEntity.getJumpBoostPower：跳跃提升每级 +0.1 跳跃力 */
+    private float getJumpBoostPower() {
+        return jumpBoostAmplifier >= 0 ? JUMP_BOOST_POWER * (jumpBoostAmplifier + 1) : 0.0F;
     }
 
     // ------------------------------------------------------------------
@@ -1119,10 +1533,11 @@ public final class PlayerPhysics {
     }
 
     /** 当前姿势对应的眼高（getEyeY = y + eyeHeight；姿势由上一 tick 末尾的 updatePlayerPose 决定） */
-    private float eyeHeight() {
+    public float eyeHeight() {
         return switch (pose) {
             case POSE_CROUCHING -> EYE_HEIGHT_CROUCHING;
             case POSE_SWIMMING -> EYE_HEIGHT_SWIMMING;
+            case POSE_GLIDING -> EYE_HEIGHT_GLIDING;
             default -> EYE_HEIGHT;
         };
     }
@@ -1146,12 +1561,16 @@ public final class PlayerPhysics {
     }
 
     /**
-     * 对齐 Player.getDesiredPose：游泳时取游泳姿势，否则按住潜行键（新帧，
-     * isShiftKeyDown）取蹲伏（abilities.flying 对机器人恒 false），默认站立。
+     * 对齐 Player.getDesiredPose：游泳时取游泳姿势，滑翔时取 FALL_FLYING 姿势，
+     * 否则按住潜行键（新帧，isShiftKeyDown）取蹲伏（abilities.flying 对机器人恒 false），
+     * 默认站立。
      */
     private byte getDesiredPose() {
         if (swimming) {
             return POSE_SWIMMING;
+        }
+        if (fallFlying) {
+            return POSE_GLIDING;
         }
         return lastKeyShift ? POSE_CROUCHING : POSE_STANDING;
     }
@@ -1166,11 +1585,12 @@ public final class PlayerPhysics {
         return noCollision(box);
     }
 
-    /** 姿势对应的碰撞盒高度（Avatar.POSES：STANDING 1.8 / CROUCHING 1.5 / SWIMMING 0.6） */
+    /** 姿势对应的碰撞盒高度（Avatar.POSES：STANDING 1.8 / CROUCHING 1.5 / SWIMMING、FALL_FLYING 0.6） */
     private float poseHeight(byte pose) {
         return switch (pose) {
             case POSE_CROUCHING -> CROUCHING_HEIGHT;
             case POSE_SWIMMING -> SWIMMING_HEIGHT;
+            case POSE_GLIDING -> GLIDING_HEIGHT;
             default -> PLAYER_HEIGHT;
         };
     }
@@ -1180,12 +1600,14 @@ public final class PlayerPhysics {
     // ------------------------------------------------------------------
 
     /**
-     * 对齐 LivingEntity.travel：优先流体行进（shouldTravelInFluid），否则空中行进
-     * （鞘翅滑翔分支需要可滑翔装备，机器人场景恒不成立，省略）。
+     * 对齐 LivingEntity.travel：优先流体行进（shouldTravelInFluid），否则鞘翅滑翔
+     * 分支（isFallFlying），再否则空中行进。
      */
     private void travel(double xxa, double zza) {
         if (shouldTravelInFluid()) {
             travelInFluid(xxa, zza);
+        } else if (fallFlying) {
+            travelFallFlying(xxa, zza);
         } else {
             travelInAir(xxa, zza);
         }
@@ -1215,21 +1637,23 @@ public final class PlayerPhysics {
     }
 
     /**
-     * 对齐 LivingEntity.getEffectiveGravity：下落且持缓降药水时取 min(重力, 0.01)；
-     * 机器人无药水效果，恒为重力属性值。
+     * 对齐 LivingEntity.getEffectiveGravity：下落且持缓降药水时取 min(重力, 0.01)。
      */
     private double getEffectiveGravity() {
-        return GRAVITY;
+        boolean isFalling = deltaY <= 0.0;
+        return isFalling && slowFallingAmplifier >= 0 ? Math.min(GRAVITY, SLOW_FALL_GRAVITY) : GRAVITY;
     }
 
     /**
      * 对齐 LivingEntity.travelInWater：0.02 加速度相对移动 → 碰撞移动 →
-     * 乘算衰减（水平：冲刺 0.9/常规 0.8；垂直 0.8）→ 流体下落修正 →
-     * 贴墙出水抬升（WATER_MOVEMENT_EFFICIENCY / DOLPHINS_GRACE / 攀爬柱
-     * 对机器人均无加成，省略）。
+     * 乘算衰减（水平：冲刺 0.9/常规 0.8，海豚恩惠 0.96；垂直 0.8）→ 流体下落修正 →
+     * 贴墙出水抬升（WATER_MOVEMENT_EFFICIENCY / 攀爬柱对机器人均无加成，省略）。
      */
     private void travelInWater(double xxa, double zza, double baseGravity, boolean isFalling, double oldY) {
         float slowDown = sprinting ? SPRINT_WATER_SLOW_DOWN : WATER_SLOW_DOWN;
+        if (dolphinsGraceAmplifier >= 0) {
+            slowDown = DOLPHINS_GRACE_SLOW_DOWN;
+        }
         moveRelative(FLUID_SPEED, xxa, zza);
         move(new Vec3(deltaX, deltaY, deltaZ));
         Vec3 ladderMovement = new Vec3(deltaX, deltaY, deltaZ)
@@ -1296,6 +1720,117 @@ public final class PlayerPhysics {
             return new Vec3(movement.x, yd, movement.z);
         }
         return movement;
+    }
+
+    // ------------------------------------------------------------------
+    // 内部：鞘翅滑翔与火箭加速（LivingEntity.travelFallFlying / updateFallFlyingMovement
+    // / Player.tryToStartFallFlying / FireworkRocketEntity.tick）
+    // ------------------------------------------------------------------
+
+    /**
+     * 对齐 Player.tryToStartFallFlying：未在滑翔、可滑翔（{@link #canGlide()}）
+     * 且不在水中时置位滑翔标志。
+     */
+    private boolean tryToStartFallFlying() {
+        if (!fallFlying && canGlide() && !isInWater()) {
+            fallFlying = true;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 对齐 LivingEntity.canGlide：非着地、无乘客（机器人恒无）、无漂浮效果，
+     * 且存在可滑翔装备（{@link #gliderEquipped} 门控：胸槽鞘翅，对齐
+     * canGlideUsing 对装备槽的逐项检查）。
+     */
+    private boolean canGlide() {
+        if (onGround || levitationAmplifier >= 0) {
+            return false;
+        }
+        return gliderEquipped.getAsBoolean();
+    }
+
+    /**
+     * 对齐 Entity.onClimbable：所在柱方块为梯子/藤蔓/脚手架
+     * （{@code BlockTags.CLIMBABLE} 成员，与 {@code RunningPathWorld.isClimbable} 同一集合）。
+     */
+    private boolean onClimbable() {
+        String name = blockNames.nameOf(world.getBlockStateId(floorToInt(x), floorToInt(y), floorToInt(z)));
+        return "ladder".equals(name) || "vine".equals(name) || "scaffolding".equals(name);
+    }
+
+    /**
+     * 对齐 LivingEntity.updateFallFlying（客户端侧）+ Entity.checkFallDistanceAccumulation：
+     * 下落速度大于 −0.5 时摔落距离封顶 1.0（缓慢滑翔不积累高摔落）；
+     * canGlide 失败（着地/入水前由流体分支接管除外）则停滑。
+     */
+    private void updateFallFlying() {
+        if (deltaY > GLIDE_FALL_SPEED_CAP && fallDistance > GLIDE_FALL_DISTANCE_CAP) {
+            fallDistance = GLIDE_FALL_DISTANCE_CAP;
+        }
+        if (!canGlide()) {
+            // 官方由服务器同步清标志；本实现本地权威，同 tick 应用同一谓词裁定
+            fallFlying = false;
+            rocketBoostTicks = 0;
+        }
+    }
+
+    /**
+     * 对齐 LivingEntity.travelFallFlying：贴攀爬面时停滑并回落空中行进；
+     * 否则滑翔弹道推进 → 碰撞移动 → 撞墙伤害（官方仅服务端结算，本地日志近似）。
+     */
+    private void travelFallFlying(double xxa, double zza) {
+        if (onClimbable()) {
+            fallFlying = false;
+            travelInAir(xxa, zza);
+            return;
+        }
+        Vec3 lastMovement = new Vec3(deltaX, deltaY, deltaZ);
+        double lastSpeed = lastMovement.horizontalDistance();
+        Vec3 updated = updateFallFlyingMovement(lastMovement);
+        deltaX = updated.x;
+        deltaY = updated.y;
+        deltaZ = updated.z;
+        move(new Vec3(deltaX, deltaY, deltaZ));
+        if (horizontalCollision && fallDamageEnabled) {
+            double newSpeed = new Vec3(deltaX, deltaY, deltaZ).horizontalDistance();
+            double dmg = (lastSpeed - newSpeed) * GLIDE_WALL_DAMAGE_SCALE - GLIDE_WALL_DAMAGE_BASE;
+            if (dmg > 0.0) {
+                log.info("[Running] 滑翔撞墙结算：速度损失对应约 {} 点伤害（本地模拟，真实伤害以服务器为准）。",
+                        String.format("%.1f", dmg));
+            }
+        }
+    }
+
+    /**
+     * 对齐 LivingEntity.updateFallFlyingMovement：公式已收敛到
+     * {@link FlightPhysics#glideStep}（单一来源）——权威推进与 {@code Trajectory}
+     * 决策推演共用同一实现，保证"预测的就是执行的"，永不分叉。
+     */
+    private Vec3 updateFallFlyingMovement(Vec3 movement) {
+        return FlightPhysics.glideStep(movement, yaw, pitch, getEffectiveGravity());
+    }
+
+    /** 视线方向单位向量（对齐 Entity.calculateViewVector，公式见 FlightPhysics；供命令/预测器查询） */
+    public Vec3 lookAngle() {
+        return FlightPhysics.lookVector(yaw, pitch);
+    }
+
+    /** 当前累计摔落距离（本地权威值；供飞行决策上下文与命令查询）。 */
+    public synchronized double fallDistance() {
+        return fallDistance;
+    }
+
+    /**
+     * 对齐 FireworkRocketEntity.tick 附着滑翔玩家分支：每 tick 叠加
+     * {@code look × 0.1 + (look × 1.5 − motion) × 0.5}（公式见 FlightPhysics）。
+     */
+    private void applyRocketImpulse() {
+        Vec3 boosted = FlightPhysics.rocketStep(new Vec3(deltaX, deltaY, deltaZ), yaw, pitch);
+        deltaX = boosted.x;
+        deltaY = boosted.y;
+        deltaZ = boosted.z;
     }
 
     /**
@@ -1388,11 +1923,21 @@ public final class PlayerPhysics {
     // ------------------------------------------------------------------
 
     /**
-     * 对齐 Player.getSpeed：移动速度属性值，疾跑时含 SPEED_MODIFIER_SPRINTING
-     * （+30% 乘算修饰符），0.1 → 0.13。
+     * 对齐 Player.getSpeed：移动速度属性值，含速度/缓慢药水与疾跑修饰符
+     * （均为 ADD_MULTIPLIED_TOTAL：速度 +0.2/级、缓慢 −0.15/级、疾跑 +30%）。
      */
     private float getSpeed() {
-        return MOVEMENT_SPEED * (sprinting ? SPRINT_SPEED_MULTIPLIER : 1.0F);
+        double multiplier = 1.0;
+        if (speedAmplifier >= 0) {
+            multiplier *= 1.0 + SPEED_EFFECT_PER_LEVEL * (speedAmplifier + 1);
+        }
+        if (slownessAmplifier >= 0) {
+            multiplier *= 1.0 + SLOWNESS_EFFECT_PER_LEVEL * (slownessAmplifier + 1);
+        }
+        if (sprinting) {
+            multiplier *= SPRINT_SPEED_MULTIPLIER;
+        }
+        return (float) (MOVEMENT_SPEED * multiplier);
     }
 
     /**
@@ -1425,7 +1970,7 @@ public final class PlayerPhysics {
         return hereFactor;
     }
 
-    /** 对齐 LivingEntity.travelInAir（无流体、无攀爬、无药水） */
+    /** 对齐 LivingEntity.travelInAir（无流体、无攀爬；含漂浮/缓降药水） */
     private void travelInAir(double xxa, double zza) {
         // 脚下方块：getBlockPosBelowThatAffectsMyMovement = getOnPos(0.500001F)
         int belowX = floorToInt(x);
@@ -1438,8 +1983,7 @@ public final class PlayerPhysics {
         float friction = blockFriction * (float) FRICTION_BASE;
 
         // handleRelativeFrictionAndCalculateMovement：先施加输入速度再碰撞移动
-        // getFrictionInfluencedSpeed：地面 = getSpeed（0.1，疾跑 0.13）×(0.21600002 / f³)；
-        // 空中 = 0.02 / 冲刺 0.025999999
+        // getFrictionInfluencedSpeed：地面 = getSpeed ×(0.21600002 / f³)；空中 = 0.02 / 冲刺 0.025999999
         float speed;
         if (onGround) {
             float f3 = blockFriction * blockFriction * blockFriction;
@@ -1450,12 +1994,14 @@ public final class PlayerPhysics {
         moveRelative(speed, xxa, zza);
         move(new Vec3(deltaX, deltaY, deltaZ));
 
-        // 重力（脚下方块未加载时对齐客户端：仅缓慢下移、不施加重力）
-        double movementY;
-        if (!belowLoaded) {
+        // 重力（脚下方块未加载时对齐客户端：仅缓慢下移、不施加重力；漂浮药水优先）
+        double movementY = deltaY;
+        if (levitationAmplifier >= 0) {
+            movementY += (LEVITATION_RATE * (levitationAmplifier + 1) - movementY) * LEVITATION_LERP;
+        } else if (!belowLoaded) {
             movementY = y > world.getMinY() ? -0.1 : 0.0;
         } else {
-            movementY = deltaY - GRAVITY;
+            movementY = deltaY - getEffectiveGravity();
         }
 
         // 摩擦
@@ -1607,16 +2153,37 @@ public final class PlayerPhysics {
     }
 
     /**
-     * 对齐 Entity.checkFallDamage：未入水且垂直位移为负时累计摔落距离
-     * （位移先按 float 截断再转入 double）；着地时结算并清零
-     * （fallOn 摔落伤害/游戏事件对无头机器人无物理影响，省略）。
+     * 对齐 Entity.checkFallDamage + LivingEntity.causeFallDamage / calculateFallDamage：
+     * 未入水且垂直位移为负时累计摔落距离（位移先按 float 截断再转入 double）；
+     * 着地时结算摔落伤害并清零。伤害 = floor((fallDistance + 1e-6 − 安全高度) × 摔落乘数)，
+     * 安全高度默认 3.0 且跳跃提升每级 +1；水/岩浆/缓降/漂浮时摔落距离清零。
      */
     private void checkFallDamage(double ya) {
         if (!isInWater() && ya < 0.0) {
             fallDistance -= (double) ((float) ya);
         }
         if (onGround) {
+            if (fallDistance > 0.0) {
+                causeFallDamage(fallDistance);
+            }
             fallDistance = 0.0;
+        }
+    }
+
+    /**
+     * 对齐 LivingEntity.causeFallDamage / calculateFallDamage：按原版公式结算摔落伤害。
+     * 本结算仅用于日志与寻路高度决策参考，真实伤害由服务器裁定；开关关闭时不结算。
+     */
+    private void causeFallDamage(double fallDist) {
+        if (!fallDamageEnabled) {
+            return;
+        }
+        float safeFall = SAFE_FALL_DISTANCE
+                + (jumpBoostAmplifier >= 0 ? JUMP_BOOST_SAFE_FALL * (jumpBoostAmplifier + 1) : 0.0F);
+        int dmg = (int) Math.floor((fallDist + 1.0E-6 - safeFall) * FALL_DAMAGE_MULTIPLIER);
+        if (dmg > 0) {
+            log.info("[Running] 摔落伤害结算：高度 {} 格 → {} 点伤害（本地模拟，真实伤害以服务器为准）。",
+                    String.format("%.2f", fallDist), dmg);
         }
     }
 
@@ -2076,6 +2643,6 @@ public final class PlayerPhysics {
     /** 把物理状态镜像到 BotState（一次加锁批量写入） */
     private void publish() {
         state.applyPhysics(x, y, z, yaw, pitch, deltaX, deltaY, deltaZ,
-                onGround, horizontalCollision, sprinting);
+                onGround, horizontalCollision, sprinting, fallFlying);
     }
 }

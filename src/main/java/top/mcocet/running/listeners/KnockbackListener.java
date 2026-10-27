@@ -6,6 +6,7 @@ import org.geysermc.mcprotocollib.network.event.session.SessionAdapter;
 import org.geysermc.mcprotocollib.network.packet.Packet;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.ClientboundSetEntityMotionPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.level.ClientboundExplodePacket;
+import top.mcocet.running.RunningConfig;
 import top.mcocet.running.bot.BotState;
 import top.mcocet.running.bot.MovementEngine;
 
@@ -30,14 +31,24 @@ import top.mcocet.running.bot.MovementEngine;
 public final class KnockbackListener extends SessionAdapter {
     private final BotState state;
     private final MovementEngine movementEngine;
+    /** 击退/爆炸冲量开关（{@code physics.knockback}，默认开启；关闭时忽略所有速度修正包） */
+    private final boolean knockbackEnabled;
 
     public KnockbackListener(BotState state, MovementEngine movementEngine) {
+        this(state, movementEngine, RunningConfig.DEFAULT_KNOCKBACK);
+    }
+
+    public KnockbackListener(BotState state, MovementEngine movementEngine, boolean knockbackEnabled) {
         this.state = state;
         this.movementEngine = movementEngine;
+        this.knockbackEnabled = knockbackEnabled;
     }
 
     @Override
     public void packetReceived(Session session, Packet packet) {
+        if (!knockbackEnabled) {
+            return; // 配置关闭：忽略一切击退/爆炸冲量
+        }
         if (packet instanceof ClientboundSetEntityMotionPacket motionPacket) {
             // 仅自身实体：官方 level.getEntity(id) 命中 LocalPlayer 时才应用
             if (motionPacket.getEntityId() == state.getEntityId()) {

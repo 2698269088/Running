@@ -58,6 +58,8 @@ public final class InventoryListener extends SessionAdapter {
         if (packet instanceof ClientboundSetPlayerInventoryPacket inv) {
             // 玩家物品栏布局（0..40），与内部布局一致，直接写入
             inventory.setSlot(inv.getSlot(), inv.getContents());
+            inventory.recordSlotTouch(inv.getSlot(), "SetPlayerInventory",
+                    amountOf(inv.getContents()));
             if (!loggedSetPlayerInv) {
                 loggedSetPlayerInv = true;
                 log.info("[Running] 背包诊断：收到 SetPlayerInventory 槽={} 物品={}（镜像已占 {} 格）。",
@@ -66,6 +68,9 @@ public final class InventoryListener extends SessionAdapter {
         } else if (packet instanceof ClientboundContainerSetSlotPacket slot) {
             if (isPlayerContainer(slot.getContainerId())) {
                 applyMenuSlot(slot.getSlot(), slot.getItem());
+                inventory.recordSlotTouch(menuSlotToInventory(slot.getSlot()),
+                        "ContainerSetSlot(c=" + slot.getContainerId() + ",menu=" + slot.getSlot() + ")",
+                        amountOf(slot.getItem()));
                 inventory.updateStateId(slot.getStateId());
                 if (!loggedSetSlot) {
                     loggedSetSlot = true;
@@ -81,6 +86,8 @@ public final class InventoryListener extends SessionAdapter {
         } else if (packet instanceof ClientboundContainerSetContentPacket content) {
             if (isPlayerContainer(content.getContainerId())) {
                 applyMenuContent(content.getItems());
+                inventory.recordSlotTouch(-1, "ContainerSetContent(n="
+                        + (content.getItems() == null ? 0 : content.getItems().length) + ")", -1);
                 inventory.updateStateId(content.getStateId());
                 if (!loggedSetContent) {
                     loggedSetContent = true;
@@ -167,5 +174,10 @@ public final class InventoryListener extends SessionAdapter {
 
     private static String describe(ItemStack stack) {
         return stack == null || stack.getId() <= 0 ? "空" : ("id=" + stack.getId() + " x" + stack.getAmount());
+    }
+
+    /** 槽位回包诊断用：物品栈数量（空=null 记 0）。 */
+    private static int amountOf(ItemStack stack) {
+        return stack == null || stack.getId() <= 0 ? 0 : stack.getAmount();
     }
 }

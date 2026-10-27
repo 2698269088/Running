@@ -13,12 +13,17 @@ import top.mcocet.running.bot.MovementEngine;
 import top.mcocet.running.bot.MovementGoal;
 import top.mcocet.running.bot.PlayerInput;
 import top.mcocet.running.bot.PlayerPhysics;
+import top.mcocet.running.bot.RocketBooster;
+import top.mcocet.running.flight.FlightContext;
+import top.mcocet.running.flight.FlightSelector;
 import top.mcocet.running.world.InventoryState;
+import top.mcocet.running.world.item.ItemRegistry;
 import xin.bbtt.mcbot.Bot;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -83,8 +88,8 @@ public final class PathingGoal implements MovementGoal {
     /** 连续“无进展→升级应急挖通”的最大次数；前进一格即归零，超过则只重算不再挖 */
     private static final int MAX_STUCK_ESCALATIONS = 12;
 
-    /** 直挖隧道模式总 tick 上限（约 5 分钟）：仍未到达且未算出路径 → 判不可达 */
-    private static final int TUNNEL_MAX_TICKS = 6000;
+    /** 直挖隧道模式总 tick 上限默认值（约 15 分钟）：仍未到达且未算出路径 → 判不可达（可由配置覆盖） */
+    private static final int DEFAULT_TUNNEL_MAX_TICKS = 18000;
     /** 直挖期间周期性重试常规寻路的间隔（tick）：区块随推进扩展，有真实路径立刻切回行走 */
     private static final int TUNNEL_RECOMPUTE_INTERVAL_TICKS = 40;
     /** 单个不可挖障碍的侧移绕行上限（格）：超过仍未绕过则判不可达 */
@@ -95,15 +100,35 @@ public final class PathingGoal implements MovementGoal {
     private static final int TUNNEL_MAX_DROP = 1;
     /** 搭桥放置：发出放置后等待服务器方块更新的 tick 数（超时未出现则重试） */
     private static final int PLACE_CONFIRM_TICKS = 8;
-    /** 搭桥放置：同一缺口最多发送放置（USE_ITEM_ON）次数，超过判为放不上 */
-    private static final int MAX_PLACE_TRIES = 3;
-    /** 单个缺口搭桥的总 tick 预算（含取物/瞄准/确认），超时放弃回落等待/绕行 */
-    private static final int BRIDGE_MAX_TICKS = 120;
+    /** 搭桥放置：同一缺口最多发送放置（USE_ITEM_ON）次数默认值，超过先放弃本缺口（下 tick 会重新规划；可由配置覆盖） */
+    private static final int DEFAULT_MAX_PLACE_TRIES = 10;
+    /** 单个缺口搭桥的总 tick 预算默认值（含取物/进边/瞄准/确认），超时放弃回落等待/绕行（可由配置覆盖） */
+    private static final int DEFAULT_BRIDGE_MAX_TICKS = 600;
+    /** 忍者桥侧放需潜行越过被点面平面的最小水平距离（格）：未越过前面被自身顶面遮挡 */
+    private static final double BRIDGE_EDGE_MARGIN = 0.12;
+    /** 忍者桥潜行进边阶段 tick 上限：超时视为到不了边缘，放弃该缺口 */
+    private static final int BRIDGE_APPROACH_MAX_TICKS = 40;
+    /** 潜行前进（忍者桥进边）：原版防走边在碰撞盒失去支撑处自动停住，不会坠入缺口 */
+    private static final PlayerInput SNEAK_FORWARD = new PlayerInput(true, false, false, false, false, true, false);
+    /** 原地潜行：搭桥放置与等待确认期间保持蹲伏姿势与边缘保护 */
+    private static final PlayerInput SNEAK_HOLD = new PlayerInput(false, false, false, false, false, true, false);
 
     /** 每 tick 最大转向角（度）——朝向限速，避免急转抖动 */
     private static final float MAX_YAW_STEP_DEG = 30.0F;
     /** 冲刺所需的朝向贴合阈值（度） */
     private static final float SPRINT_HEADING_THRESHOLD_DEG = 20.0F;
+
+    /** 路径动态重计算：检查前方 movement 代价的步数上限（对齐 Baritone costVerificationLookahead） */
+    private static final int COST_VERIFICATION_LOOKAHEAD = 5;
+    /** 路径动态重计算：当前 movement 已执行 tick 数超过预估代价 + 该值时判定超时（对齐 Baritone movementTimeoutTicks） */
+    private static final int MOVEMENT_TIMEOUT_TICKS = 100;
+    /** 路径动态重计算：当前 movement 实际代价超过原始预估代价 + 该值时判定世界已变（对齐 Baritone maxCostIncrease） */
+    private static final double MAX_COST_INCREASE = 10.0;
+
+    /** 上岸模式：在水中搜索最近可站立岸边的最大同心环半径（格） */
+    private static final int WATER_ESCAPE_SHORE_RADIUS = 16;
+    /** 水中行为默认优先级：游泳优先（朝目标游），而非上岸优先 */
+    private static final boolean DEFAULT_WATER_SWIM_PRIORITY = true;
 
     /** Parkour：沿方向自 src 中心起跳的最小位移（接近远边缘） */
     private static final double PARKOUR_TAKEOFF_PROG = 0.3;
@@ -113,6 +138,21 @@ public final class PathingGoal implements MovementGoal {
     private static final double PARKOUR_MIN_SPEED = 0.06;
     /** Parkour：腾空最长 tick 数，超过判为失败放弃重算 */
     private static final int PARKOUR_MAX_AIR_TICKS = 60;
+
+    /** Glide：边缘起跳的沿向位移阈值（与 Parkour 同节奏） */
+    private static final double GLIDE_TAKEOFF_PROG = 0.6;
+    /** Glide：起滑段（跳台→空中二次跳跃→滑翔建立）超时 tick */
+    private static final int GLIDE_LAUNCH_TIMEOUT_TICKS = 40;
+    /** Glide：巡航段额外超时上限 = 预估代价×2 + 该余量 tick；超时判失败重算 */
+    private static final int GLIDE_CRUISE_TIMEOUT_MARGIN_TICKS = 200;
+    /** Glide：两次补弹的最小间隔 tick（对齐 MS 火箭寿命上界，同刻只挂一枚） */
+    private static final int GLIDE_BOOST_COOLDOWN_TICKS = 40;
+    /** Glide：起飞/起滑窗口的前置抬头俯仰（度；原版平地起飞靠上仰视线+火箭拉出地面） */
+    private static final float GLIDE_LAUNCH_PITCH = -55.0F;
+    /** Glide：着陆水平容差（格，叠加 arriveRadius） */
+    private static final double GLIDE_LAND_TOLERANCE = 1.0;
+    /** Glide：着陆垂直容差（格） */
+    private static final double GLIDE_LAND_Y_TOLERANCE = 1.5;
 
     private final Goal goal;
     private final PathWorld world;
@@ -124,6 +164,22 @@ public final class PathingGoal implements MovementGoal {
     private final InventoryState inventory;
     /** 卡住应急挖通开关（对齐配置 pathfinding.stuck-dig-recovery） */
     private final boolean stuckDigEnabled;
+    /** 直挖隧道总 tick 上限（对齐配置 pathfinding.tunnel-max-ticks）：本轮允许持续的直挖/搭桥总时长 */
+    private final int tunnelMaxTicks;
+    /** 单个缺口搭桥总 tick 预算（对齐配置 pathfinding.bridge-max-ticks） */
+    private final int bridgeMaxTicks;
+    /** 同一缺口最多发送放置次数（对齐配置 pathfinding.max-place-tries） */
+    private final int maxPlaceTries;
+    /** 水中行为优先级：{@code true}=游泳优先（朝目标游）；{@code false}=上岸优先（先找岸边） */
+    private final boolean waterSwimPriority;
+    /** 滑翔执行：物品表（烟花选弹需要；null 表示无法自动补弹） */
+    private final ItemRegistry itemRegistry;
+    /** 滑翔执行：巡航俯仰角（度，取配置 fly.glide-pitch） */
+    private final float glidePitch;
+    /** 滑翔执行：自动补弹水平速度阈值（取配置 fly.boost-min-speed） */
+    private final double glideBoostMinSpeed;
+    /** 滑翔执行：无法解析组件时的火箭时长（取配置 fly.rocket-flight-duration） */
+    private final int rocketFallbackDuration;
 
     // ---- 跨线程状态 ----
     private final AtomicReference<PathFinder.Result> pendingResult = new AtomicReference<>();
@@ -157,7 +213,8 @@ public final class PathingGoal implements MovementGoal {
     private int digTargetY;
     private int digTargetZ;
     private Direction digFace;
-    private int digRequiredTicks;
+    /** 每 tick 破坏进度（按规划最优工具换算，对齐原版 getDestroyProgress 累加语义） */
+    private double digPerTickProgress = 1.0D;
     /** 挖掘时应手持的快捷栏槽（-1 无需改变） */
     private int digEquipSlot = -1;
     /** 本格累计挖/取 tick（超预算则判不可破放弃） */
@@ -180,7 +237,7 @@ public final class PathingGoal implements MovementGoal {
     // 直挖隧道（引擎线程私有）：目标反复无路径时，朝目标方向逐格直挖前进
     /** 是否处于直挖隧道模式 */
     private boolean tunnelDig;
-    /** 本次直挖累计 tick（超 {@link #TUNNEL_MAX_TICKS} 判不可达） */
+    /** 本次直挖累计 tick（超 {@link #tunnelMaxTicks} 判不可达） */
     private int tunnelTicks;
     /** 区块重试耗尽，已置备“下一空闲时转入直挖隧道” */
     private boolean needTunnel;
@@ -211,6 +268,14 @@ public final class PathingGoal implements MovementGoal {
     private int bridgeTries;
     /** 放置发出后等待方块更新中（>0 表示等待，归零后重查站立面） */
     private int bridgeConfirmTicks;
+    /** 本次是否为“站在块侧放”的忍者桥（须先潜行进边，否则被点面对视线不可见） */
+    private boolean bridgeNinja;
+    /** 本缺口潜行进边阶段累计 tick */
+    private int bridgeApproachTicks;
+    /** 搭桥在途锁定的缺口坐标（进边时身体中心会越过列边界，不能逐 tick 重算目标） */
+    private int bridgeColX;
+    private int bridgeFootY;
+    private int bridgeColZ;
 
     // Parkour 执行（引擎线程私有）
     /** 当前正在驱动的 parkour 步索引（随步前进重置阶段） */
@@ -219,6 +284,40 @@ public final class PathingGoal implements MovementGoal {
     private int parkourPhase;
     /** 腾空累计 tick（超时未落→判失败） */
     private int parkourAirTicks;
+
+    // Glide 执行（引擎线程私有）
+    /** 当前正在驱动的滑翔步索引（随步切换重置阶段） */
+    private int glideStepIndex = -1;
+    /** 0 = 助跑/边缘起跳；1 = 腾空起滑（二次跳跃脉冲）；2 = 巡航滑翔 */
+    private int glidePhase;
+    /** 起滑段累计 tick（LAUNCH 超时判定） */
+    private int glideLaunchTicks;
+    /** 巡航段累计 tick（超时判定） */
+    private int glideCruiseTicks;
+    /** 距上次补弹的 tick 计数 */
+    private int glideTicksSinceBoost;
+    /** 滑翔补弹执行器（懒建；无烟花世界/未开启自动补弹时可为 null） */
+    private RocketBooster glideBooster;
+    /** 滑翔巡航候选网格决策器（移植 MS 飞行子系统：每 tick 纯物理推演选安全最优） */
+    private final FlightSelector glideSelector = new FlightSelector();
+    /** 决策推演用的世界查询适配器（包装 {@link #world}，与 A* 同一套方块语义） */
+    private PathFlightQuery glideQuery;
+
+    // 路径动态重计算（引擎线程私有）
+    /** 当前 movement 的原始预估代价（在 movement 开始时缓存） */
+    private double currentMovementOriginalCostEstimate = -1;
+    /** 当前 movement 已执行的 tick 数 */
+    private int ticksOnCurrentMovement = 0;
+    /** 当前 movement 的索引（用于检测 movement 切换） */
+    private int currentMovementIndex = -1;
+    /** 上一条路径（用于 Favoring 回溯惩罚） */
+    private Path previousPath;
+
+    // 落水上岸模式（引擎线程私有）
+    /** 是否处于“落水→上岸”模式：BOT 在水中且无可用路径时，游泳寻找最近岸边 */
+    private boolean waterEscape;
+    /** 上岸模式累计 tick（超时则放弃，交回常规寻路） */
+    private int waterEscapeTicks;
 
     public PathingGoal(Goal goal, PathWorld world, double arriveRadius, ExecutorService executor) {
         this(goal, world, null, arriveRadius, executor, false, false);
@@ -231,6 +330,30 @@ public final class PathingGoal implements MovementGoal {
 
     public PathingGoal(Goal goal, PathWorld world, InventoryState inventory, double arriveRadius,
                        ExecutorService executor, boolean continuous, boolean stuckDigEnabled) {
+        this(goal, world, inventory, arriveRadius, executor, continuous, stuckDigEnabled,
+                DEFAULT_TUNNEL_MAX_TICKS, DEFAULT_BRIDGE_MAX_TICKS, DEFAULT_MAX_PLACE_TRIES);
+    }
+
+    public PathingGoal(Goal goal, PathWorld world, InventoryState inventory, double arriveRadius,
+                       ExecutorService executor, boolean continuous, boolean stuckDigEnabled,
+                       int tunnelMaxTicks, int bridgeMaxTicks, int maxPlaceTries) {
+        this(goal, world, inventory, arriveRadius, executor, continuous, stuckDigEnabled,
+                tunnelMaxTicks, bridgeMaxTicks, maxPlaceTries, DEFAULT_WATER_SWIM_PRIORITY);
+    }
+
+    public PathingGoal(Goal goal, PathWorld world, InventoryState inventory, double arriveRadius,
+                       ExecutorService executor, boolean continuous, boolean stuckDigEnabled,
+                       int tunnelMaxTicks, int bridgeMaxTicks, int maxPlaceTries, boolean waterSwimPriority) {
+        this(goal, world, inventory, arriveRadius, executor, continuous, stuckDigEnabled,
+                tunnelMaxTicks, bridgeMaxTicks, maxPlaceTries, waterSwimPriority,
+                null, 0.0F, 0.3, 1);
+    }
+
+    public PathingGoal(Goal goal, PathWorld world, InventoryState inventory, double arriveRadius,
+                       ExecutorService executor, boolean continuous, boolean stuckDigEnabled,
+                       int tunnelMaxTicks, int bridgeMaxTicks, int maxPlaceTries, boolean waterSwimPriority,
+                       ItemRegistry itemRegistry, float glidePitch, double glideBoostMinSpeed,
+                       int rocketFallbackDuration) {
         this.goal = goal;
         this.world = world;
         this.inventory = inventory;
@@ -238,6 +361,14 @@ public final class PathingGoal implements MovementGoal {
         this.executor = executor;
         this.continuous = continuous;
         this.stuckDigEnabled = stuckDigEnabled;
+        this.tunnelMaxTicks = tunnelMaxTicks > 0 ? tunnelMaxTicks : DEFAULT_TUNNEL_MAX_TICKS;
+        this.bridgeMaxTicks = bridgeMaxTicks > 0 ? bridgeMaxTicks : DEFAULT_BRIDGE_MAX_TICKS;
+        this.maxPlaceTries = maxPlaceTries > 0 ? maxPlaceTries : DEFAULT_MAX_PLACE_TRIES;
+        this.waterSwimPriority = waterSwimPriority;
+        this.itemRegistry = itemRegistry;
+        this.glidePitch = glidePitch;
+        this.glideBoostMinSpeed = glideBoostMinSpeed;
+        this.rocketFallbackDuration = rocketFallbackDuration;
         this.path = null;
         this.index = 0;
     }
@@ -285,6 +416,19 @@ public final class PathingGoal implements MovementGoal {
         // (3) 卡住应急挖通：优先于常规跟随，朝前进方向把阻挡方块挖通
         if (emergencyDig) {
             tickEmergencyDig(engine, px, py, pz);
+            return;
+        }
+
+        // (3.5) 落水检测：仅当 BOT 在水中且当前无可用路径（无路可走）时才进入水中兜底移动；
+        // 已有路径（含 A* 生成的游泳路径）时优先跟随，避免劫持正常游泳移动。
+        if (!waterEscape && world.isWater(floor(px), floor(py), floor(pz))
+                && (path == null || index >= path.length())) {
+            waterEscape = true;
+            waterEscapeTicks = 0;
+            log.info("[Running] BOT 落水，{}。", waterSwimPriority ? "朝目标方向游泳前进" : "寻找最近岸边");
+        }
+        if (waterEscape) {
+            tickWaterEscape(engine, physics, px, py, pz);
             return;
         }
 
@@ -367,6 +511,11 @@ public final class PathingGoal implements MovementGoal {
         generation++;
         pendingResult.set(null);
         path = null;
+        // 滑翔在途补弹流程撤销（目标被替换/结束时不再推进其点击链）
+        if (glideBooster != null) {
+            glideBooster.cancel();
+            glideBooster = null;
+        }
         finished = true;
     }
 
@@ -408,6 +557,10 @@ public final class PathingGoal implements MovementGoal {
     }
 
     private void adopt(Path newPath, boolean segment) {
+        // 保存旧路径用于 Favoring 回溯惩罚
+        if (this.path != null && this.path != newPath) {
+            this.previousPath = this.path;
+        }
         this.path = newPath;
         this.index = 0;
         this.segmentMode = segment;
@@ -418,6 +571,14 @@ public final class PathingGoal implements MovementGoal {
             this.totalReplans = 0;
         }
         resetStuck();
+        resetMovementTracking();
+    }
+
+    /** 重置 movement 追踪状态（新路径采纳时调用） */
+    private void resetMovementTracking() {
+        currentMovementOriginalCostEstimate = -1;
+        ticksOnCurrentMovement = 0;
+        currentMovementIndex = -1;
     }
 
     // ------------------------------------------------------------------
@@ -440,11 +601,13 @@ public final class PathingGoal implements MovementGoal {
         final long primary = stuck ? REPLAN_PRIMARY_TIMEOUT_MS : PRIMARY_TIMEOUT_MS;
         final long failure = stuck ? REPLAN_FAILURE_TIMEOUT_MS : FAILURE_TIMEOUT_MS;
         totalReplans++;
+        // 构建 Favoring：若存在旧路径，则施加回溯惩罚（系数 1.5，对齐 Baritone 默认）
+        final Favoring favoring = previousPath != null ? new Favoring(previousPath, 1.5) : new Favoring();
         try {
             executor.submit(() -> {
                 PathFinder.Result result;
                 try {
-                    PathFinder finder = new PathFinder(world, target, sx, sy, sz);
+                    PathFinder finder = new PathFinder(world, target, sx, sy, sz, favoring);
                     result = finder.findPath(primary, failure);
                 } catch (Throwable t) {
                     result = null;
@@ -554,11 +717,11 @@ public final class PathingGoal implements MovementGoal {
      * （深坑交给 A* 规划）；绕行超过 {@link #TUNNEL_BYPASS_MAX_SIDE} 格或总 tick 超限才判不可达。
      */
     private void tickTunnelDig(MovementEngine engine, PlayerPhysics physics, double px, double py, double pz) {
-        if (++tunnelTicks > TUNNEL_MAX_TICKS) {
+        if (++tunnelTicks > tunnelMaxTicks) {
             endTunnel(engine);
             finished = true;
             engine.setInput(PlayerInput.EMPTY);
-            log.info("[Running] 直挖 {} tick 仍未到达目标，判定不可达。", TUNNEL_MAX_TICKS);
+            log.info("[Running] 直挖 {} tick 仍未到达目标，判定不可达。", tunnelMaxTicks);
             return;
         }
         // 隧道推进使区块不断扩展：周期性请求 A* 前瞻路径，一有安全路线立刻切回“走路”
@@ -605,7 +768,13 @@ public final class PathingGoal implements MovementGoal {
             return;
         }
         if (st == DigStatus.FAILED) {
-            if (!sidestep) {
+            // 不可挖障碍：若只 1 格高（脚格本身是可站稳实心块、爬上去后头格及其上一格均净空），
+            // 不绕行、不判死——直接朝障碍列中心前进并贴墙起跳翻过其顶（跨越基岩/黑曜石等矮障碍）。
+            if (world.isStandable(colX, fy, colZ)
+                    && world.isPassable(colX, fy + 1, colZ)
+                    && world.isPassable(colX, fy + 2, colZ)) {
+                // 命中翻越条件：空分支体，落出 if/else 链后走下方“翻越专属”输入分支
+            } else if (!sidestep) {
                 // 主轴不可挖：记下障碍列，开启垂直绕行（优先偏向锚点所在侧，无偏向先取正向）
                 tunnelBlockX = colX;
                 tunnelBlockZ = colZ;
@@ -616,20 +785,30 @@ public final class PathingGoal implements MovementGoal {
                 log.info("[Running] 前方 ({}, {}) 不可挖，绕行避开。", colX, colZ);
                 engine.setInput(PlayerInput.EMPTY);
                 return;
-            }
-            // 绕行方向也受阻：反向一次；两向皆阻 → 确实被困，判不可达
-            if (!tunnelSideFlipped) {
-                tunnelSideFlipped = true;
-                tunnelSideDir = -tunnelSideDir;
-                tunnelSideSteps = 0;
+            } else {
+                // 绕行方向也受阻：反向一次；两向皆阻 → 确实被困，判不可达
+                if (!tunnelSideFlipped) {
+                    tunnelSideFlipped = true;
+                    tunnelSideDir = -tunnelSideDir;
+                    tunnelSideSteps = 0;
+                    engine.setInput(PlayerInput.EMPTY);
+                    return;
+                }
+                endTunnel(engine);
+                finished = true;
                 engine.setInput(PlayerInput.EMPTY);
+                log.info("[Running] 直挖绕行失败：障碍列 ({}, {}) 两侧均受阻，判定不可达。",
+                        tunnelBlockX, tunnelBlockZ);
                 return;
             }
-            endTunnel(engine);
-            finished = true;
-            engine.setInput(PlayerInput.EMPTY);
-            log.info("[Running] 直挖绕行失败：障碍列 ({}, {}) 两侧均受阻，判定不可达。",
-                    tunnelBlockX, tunnelBlockZ);
+            // 正在翻越障碍：不走绕行记账与搭桥门控，直接进“走一格”
+            float overYaw = yawToward(colX + 0.5 - px, colZ + 0.5 - pz);
+            engine.look(stepToward(physics.yaw(), overYaw, MAX_YAW_STEP_DEG), physics.pitch());
+            PlayerInput overInput = new PlayerInput(true, false, false, false, false, false, false);
+            if (physics.horizontalCollision() && physics.canJump()) {
+                overInput = overInput.withJump(true);
+            }
+            engine.setInput(overInput);
             return;
         }
         if (!sidestep) {
@@ -646,10 +825,30 @@ public final class PathingGoal implements MovementGoal {
             return;
         }
         // 列已畅通：盲走只允许同层或 ≤1 格下坠；更深的坑交给 A* 前瞻规划绕行/阶梯下降，
-        // 若允许放置搭桥则先“铺”一块地板再走上去（无路可踩 → 放方块补齐踩点）
-        if (!world.isStandable(colX, fy - 1, colZ) && !fallSafeWithin(colX, fy, colZ, TUNNEL_MAX_DROP)) {
-            if (!world.canPlace()
-                    || bridgeColumn(engine, colX, fy, colZ, fx, fz) != DigStatus.CLEARED) {
+        // 若允许放置搭桥则先“铺”一块地板再走上去（无路可踩 → 放方块补齐踩点，可连续搭过任意长缺口）。
+        // 搭桥在途：缺口锁定为规划时坐标（忍者桥潜行进边会让身体中心越过列边界，
+        // 若用重算的 colX 会错移目标）；输入由 bridgeColumn 自管，调用处仅在 FAILED 时刹车
+        if (bridgeTargetKey != UNSET_KEY) {
+            DigStatus bridge = bridgeColumn(engine, bridgeColX, bridgeFootY, bridgeColZ, fx, fz);
+            if (bridge != DigStatus.CLEARED) {
+                if (bridge == DigStatus.FAILED) {
+                    bridgeFailDetour(engine, stepX, stepZ, dz, dx, colX, colZ, sidestep);
+                }
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+        } else if (!world.isStandable(colX, fy - 1, colZ) && !fallSafeWithin(colX, fy, colZ, TUNNEL_MAX_DROP)) {
+            if (!world.canPlace()) {
+                // 不允许搭桥且下坠超限：改向绕行（而非原地卡死）
+                bridgeFailDetour(engine, stepX, stepZ, dz, dx, colX, colZ, sidestep);
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+            DigStatus bridge = bridgeColumn(engine, colX, fy, colZ, fx, fz);
+            if (bridge != DigStatus.CLEARED) {
+                if (bridge == DigStatus.FAILED) {
+                    bridgeFailDetour(engine, stepX, stepZ, dz, dx, colX, colZ, sidestep);
+                }
                 engine.setInput(PlayerInput.EMPTY);
                 return;
             }
@@ -678,6 +877,36 @@ public final class PathingGoal implements MovementGoal {
         return false;
     }
 
+    /**
+     * 搭桥失败 / 无法搭桥时的绕行兜底：把当前缺口列记为障碍，改朝垂直方向侧移绕行
+     * （优先偏向锚点一侧；受阻再反向，两向皆阻才判不可达）。与“不可挖障碍”共用同一套
+     * {@code tunnelBlockX/tunnelBlockZ/tunnelSideDir} 记账，避免搭桥失败（无方块 / 无锚点 /
+     * 超预算）时原地卡死。
+     */
+    private void bridgeFailDetour(MovementEngine engine, int stepX, int stepZ, int dz, int dx,
+                                  int colX, int colZ, boolean sidestep) {
+        if (!sidestep) {
+            tunnelBlockX = colX;
+            tunnelBlockZ = colZ;
+            int sd = stepX != 0 ? Integer.signum(dz) : Integer.signum(dx);
+            tunnelSideDir = sd == 0 ? 1 : sd;
+            tunnelSideFlipped = false;
+            tunnelSideSteps = 0;
+            log.info("[Running] 前方 ({}, {}) 无法搭桥，绕行避开。", colX, colZ);
+            return;
+        }
+        if (!tunnelSideFlipped) {
+            tunnelSideFlipped = true;
+            tunnelSideDir = -tunnelSideDir;
+            tunnelSideSteps = 0;
+            return;
+        }
+        endTunnel(engine);
+        finished = true;
+        log.info("[Running] 直挖搭桥绕行失败：缺口列 ({}, {}) 两侧均受阻，判定不可达。",
+                tunnelBlockX, tunnelBlockZ);
+    }
+
     // ------------------------------------------------------------------
     // 放置搭桥（引擎线程；直挖遇到“无路可踩”的缺口时铺地板）
     // ------------------------------------------------------------------
@@ -689,17 +918,20 @@ public final class PathingGoal implements MovementGoal {
      * 向相邻实心面点击放置，等待方块更新后复查站立面。
      *
      * <p>点击锚优先级：脚下相邻块（忍者桥，向侧面放置）→ 目标下方块（UP 面）→ 四横向相邻块；
-     * 与 ActCommand 验证过的链路一致，光标取面中心略内偏。</p>
+     * 光标取面中心略内偏并带小幅随机抖动。忍者桥侧放须先潜行朝缺口前进到站立列边缘
+     * （原版防走边自动停住），身体中心越过被点面平面后该面才对视线可见——否则
+     * 视线命中顶面、与包声称面不一致，Vulcan 会报 Scaffold（Type M，Invalid block face）。
+     * 搭桥在途期间本例程自管输入与朝向，调用处不覆盖。</p>
      *
      * @return {@link DigStatus#CLEARED} 该格已可踩（原本就有或已铺好）；{@link DigStatus#BUSY}
      *         取物 / 放置 / 等待更新中；{@link DigStatus#FAILED} 无锚点 / 无物品 / 超预算
      */
     private DigStatus bridgeColumn(MovementEngine engine, int colX, int footY, int colZ,
                                    int standX, int standZ) {
+        PlayerPhysics physics = engine.physics();
         int floorY = footY - 1;
         if (world.isStandable(colX, floorY, colZ)) {
             if (bridgeTargetKey != UNSET_KEY) {
-                log.info("[Running] 已在 ({}, {}, {}) 铺方块搭路。", colX, floorY, colZ);
                 clearBridge(engine);
             }
             return DigStatus.CLEARED;
@@ -707,40 +939,71 @@ public final class PathingGoal implements MovementGoal {
 
         long key = blockKey(colX, floorY, colZ);
         if (key != bridgeTargetKey) {
-            // 新缺口：确认目标是空气，规划点击锚与放置物品
+            // 新缺口：目标格可替换（空气/水/岩浆/草等）直接放；不可替换但可挖的方块先挖掉再放
             clearBridge(engine);
-            if (world.stateAt(colX, floorY, colZ) != PathWorld.AIR) {
-                return DigStatus.FAILED; // 非空且不可踩（如含水/植物），放置无意义
+            if (!world.isReplaceable(colX, floorY, colZ)) {
+                // 目标格被不可替换的方块占据：可挖则先挖开，否则放弃
+                if (!world.isBreakable(colX, floorY, colZ)) {
+                    return DigStatus.FAILED; // 不可替换且不可挖（基岩等）
+                }
+                DigStatus dig = digColumn(engine, colX, floorY, colZ, physics.x(), physics.y(), physics.z());
+                if (dig != DigStatus.CLEARED) {
+                    return dig; // BUSY（挖掘中）或 FAILED
+                }
             }
             Placement anchor = findPlaceAnchor(colX, floorY, colZ, standX, standZ);
             if (anchor == null) {
+                log.info("[Running] ({}, {}, {}) 搭桥失败：无可依附锚点（下方/相邻/脚下均无完整面）。",
+                        colX, floorY, colZ);
                 return DigStatus.FAILED;
             }
             PlaceTool plan = world.planPlaceBlock();
             if (!plan.placeable()) {
+                log.info("[Running] ({}, {}, {}) 搭桥失败：背包无可放置方块。", colX, floorY, colZ);
                 return DigStatus.FAILED;
             }
             bridgeTargetKey = key;
             bridgePlacement = anchor;
+            bridgeNinja = anchor.ninja;
+            bridgeApproachTicks = 0;
+            bridgeColX = colX;
+            bridgeFootY = footY;
+            bridgeColZ = colZ;
             bridgeEquipSlot = plan.equipHotbarSlot();
             bridgeTicks = 0;
             bridgeTries = 0;
             bridgeConfirmTicks = 0;
             activePlace = null;
             if (plan.needsRelocate() && inventory != null) {
-                log.info("[Running] 搭桥需先从主背包槽 {} 取方块到快捷栏槽 {}。",
-                        plan.relocateFromSlot(), bridgeEquipSlot);
                 placeRelocate = InventoryMoveGoal.toHotbar(inventory, plan.relocateFromSlot(), bridgeEquipSlot);
             } else {
                 equipForPlace();
             }
-            log.info("[Running] ({}, {}, {}) 无路可踩，尝试放置方块搭桥。", colX, floorY, colZ);
         }
 
         // 预算：整体超时与重试次数双封顶，防止反复放置不生效地耗着
-        if (++bridgeTicks > BRIDGE_MAX_TICKS || bridgeTries >= MAX_PLACE_TRIES) {
+        if (++bridgeTicks > bridgeMaxTicks || bridgeTries >= maxPlaceTries) {
             clearBridge(engine);
             return DigStatus.FAILED;
+        }
+
+        // 进边与站定输入（视线可见性保障）：忍者桥被点侧面须让身体中心越过其平面，
+        // 潜行同时触发原版防走边，在碰撞盒失去支撑处自动停住；非忍者锚点原地待命
+        if (bridgeNinja) {
+            if (ninjaEdgeGap(physics, bridgePlacement) > BRIDGE_EDGE_MARGIN) {
+                if (++bridgeApproachTicks > BRIDGE_APPROACH_MAX_TICKS) {
+                    clearBridge(engine);
+                    return DigStatus.FAILED; // 受阻迟迟到不了边缘：放弃该缺口
+                }
+                double hx = bridgePlacement.x + bridgePlacement.cursorX - physics.x();
+                double hz = bridgePlacement.z + bridgePlacement.cursorZ - physics.z();
+                engine.look(stepToward(physics.yaw(), yawToward(hx, hz), MAX_YAW_STEP_DEG), physics.pitch());
+                engine.setInput(SNEAK_FORWARD);
+                return DigStatus.BUSY;
+            }
+            engine.setInput(SNEAK_HOLD);
+        } else {
+            engine.setInput(PlayerInput.EMPTY);
         }
 
         // 阶段 A：取方块（主背包 → 快捷栏搬迁）
@@ -777,30 +1040,72 @@ public final class PathingGoal implements MovementGoal {
 
     /**
      * 为目标地板格 {@code (tx, ty, tz)} 找一个相邻可依附块与点击面。
-     * 优先脚下块（忍者桥侧放），其次下方块（UP 面），再四横向；都不实心可依附则 null。
+     *
+     * <p><b>优先点目标正下方块的顶面（UP）</b>：Vulcan 的 Scaffold（Type M / “Invalid block face”）
+{@code Vulcan_j→Vulcan_m} 只把玩家的 <b>yaw</b> 按 90° 区间归到某个水平面（北/东/南/西，对角线
+     * 归 SELF），<b>永远不会返回 UP/DOWN</b>；服务端由放置事件推算的真实面 {@code var18 =
+     * getBlockAgainst().getFace(getBlock())} 一旦与这个水平视线面 {@code var19} 相等即判违规。因此只要
+     * 把放置面取为<b>垂直的顶面</b>，{@code var18} 恒为 UP、必不等于任何 {@code var19}，从结构上不可能
+     * 触发 Type M；而且十字准星俯视顶面时“视线命中面 ≡ 声称面”，同时满足 GhostHand/Aim 的面一致性，
+     * 也无需潜行进边。仅当目标下方是悬空 void（没有可点的 UP 锚点）时，才退回点相邻块<b>侧面</b>
+     * 的搭法（四横向 / 脚下忍者桥，后者须先潜行进边让侧面进入视线）。</p>
      */
     private Placement findPlaceAnchor(int tx, int ty, int tz, int standX, int standZ) {
-        if (world.isStandable(standX, ty, standZ)) {
-            Direction f = faceBetween(standX, ty, standZ, tx, ty, tz);
-            if (f != null) {
-                return new Placement(standX, ty, standZ, f);
-            }
+        // ① 目标正下方块的顶面（UP）：垂直面，反作弊最安全，永远优先。
+        //    实心块须顶面完整可附着；可替换方块（水/岩浆等）无碰撞盒，直接作为依附面
+        if (anchorAttachable(tx, ty - 1, tz, FACE_UP)) {
+            return new Placement(tx, ty - 1, tz, Direction.UP, false);
         }
-        if (world.isStandable(tx, ty - 1, tz)) {
-            return new Placement(tx, ty - 1, tz, Direction.UP);
-        }
+        // ② 四横向相邻块的侧面（水平面，仅当下方无支撑时使用）；实心块须侧面完整（排除楼梯/半砖斜面）
         int[][] offs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
         for (int[] o : offs) {
             int ax = tx + o[0];
             int az = tz + o[1];
             if (ax == standX && az == standZ) {
-                continue; // 已在上面优先尝试过
+                continue; // 站立列留到 ③ 作忍者桥统一处理（带潜行进边）
             }
-            if (world.isStandable(ax, ty, az)) {
-                return new Placement(ax, ty, az, faceBetween(ax, ty, az, tx, ty, tz));
+            Direction f = faceBetween(ax, ty, az, tx, ty, tz);
+            if (f != null && anchorAttachable(ax, ty, az, faceCode(f))) {
+                return new Placement(ax, ty, az, f, false);
             }
         }
+        // ③ 兜底：忍者桥，点脚下块的侧面（水平面，须潜行进边使该面可见）；实心块须侧面完整
+        Direction f = faceBetween(standX, ty, standZ, tx, ty, tz);
+        if (f != null && anchorAttachable(standX, ty, standZ, faceCode(f))) {
+            return new Placement(standX, ty, standZ, f, true);
+        }
         return null;
+    }
+
+    /**
+     * 该格能否作为放置依附锚点：实心块须对应面完整（可附着）；可替换方块（水/岩浆/草等）
+     * 无碰撞盒，直接可作为依附面（放置时会被替换掉）。
+     */
+    private boolean anchorAttachable(int x, int y, int z, int face) {
+        if (world.isStandable(x, y, z)) {
+            return world.isFaceSturdy(x, y, z, face);
+        }
+        return world.isReplaceable(x, y, z);
+    }
+
+    /** 完整面朝向编码（对齐 {@code BlockNameTable.FACE_*}：北0/南1/西2/东3/下4/上5） */
+    private static final int FACE_NORTH = 0;
+    private static final int FACE_SOUTH = 1;
+    private static final int FACE_WEST = 2;
+    private static final int FACE_EAST = 3;
+    private static final int FACE_DOWN = 4;
+    private static final int FACE_UP = 5;
+
+    /** {@link Direction} → 完整面朝向编码（{@link #FACE_NORTH} 等）。 */
+    private static int faceCode(Direction d) {
+        return switch (d) {
+            case NORTH -> FACE_NORTH;
+            case SOUTH -> FACE_SOUTH;
+            case WEST -> FACE_WEST;
+            case EAST -> FACE_EAST;
+            case DOWN -> FACE_DOWN;
+            case UP -> FACE_UP;
+        };
     }
 
     /** 相邻两格间“从源指向目标”的面；不相邻返回 null。 */
@@ -818,15 +1123,35 @@ public final class PathingGoal implements MovementGoal {
         return ey == 1 ? Direction.UP : Direction.DOWN;
     }
 
-    /** 面中心命中点（与 ActCommand 一致：法向轴取贴近面内侧的 0.001/0.999 避免边界抖动）。 */
+    /**
+     * 忍者桥：身体中心到被点面平面的带符号水平距离。&gt;0 表示尚未越过该面——
+     * 站在块正上方时其侧面被自身顶面遮挡（视线先到顶面），必须潜行到中心越出
+     * 平面才能合法命中侧面；UP/DOWN 不存在此问题，恒返回 0。
+     */
+    private static double ninjaEdgeGap(PlayerPhysics physics, Placement p) {
+        return switch (p.face) {
+            case EAST -> (p.x + 1.0) - physics.x();
+            case WEST -> physics.x() - p.x;
+            case SOUTH -> (p.z + 1.0) - physics.z();
+            case NORTH -> physics.z() - p.z;
+            default -> 0.0;
+        };
+    }
+
+    /**
+     * 面中心命中点（法向轴取贴近面内侧的 0.001/0.999 避免边界抖动）；切向轴叠加
+     * ±0.08 随机抖动，避免每次放置的光标完全相同。
+     */
     private static float[] cursorForFace(Direction face) {
+        double j1 = (ThreadLocalRandom.current().nextDouble() - 0.5) * 0.16;
+        double j2 = (ThreadLocalRandom.current().nextDouble() - 0.5) * 0.16;
         return switch (face) {
-            case DOWN -> new float[]{0.5F, 0.001F, 0.5F};
-            case UP -> new float[]{0.5F, 0.999F, 0.5F};
-            case NORTH -> new float[]{0.5F, 0.5F, 0.001F};
-            case SOUTH -> new float[]{0.5F, 0.5F, 0.999F};
-            case WEST -> new float[]{0.001F, 0.5F, 0.5F};
-            case EAST -> new float[]{0.999F, 0.5F, 0.5F};
+            case DOWN -> new float[]{(float) (0.5 + j1), 0.001F, (float) (0.5 + j2)};
+            case UP -> new float[]{(float) (0.5 + j1), 0.999F, (float) (0.5 + j2)};
+            case NORTH -> new float[]{(float) (0.5 + j1), (float) (0.5 + j2), 0.001F};
+            case SOUTH -> new float[]{(float) (0.5 + j1), (float) (0.5 + j2), 0.999F};
+            case WEST -> new float[]{0.001F, (float) (0.5 + j1), (float) (0.5 + j2)};
+            case EAST -> new float[]{0.999F, (float) (0.5 + j1), (float) (0.5 + j2)};
         };
     }
 
@@ -839,12 +1164,15 @@ public final class PathingGoal implements MovementGoal {
         final float cursorX;
         final float cursorY;
         final float cursorZ;
+        /** 是否点击站立列方块的侧面（忍者桥）：须潜行进边后该面才可见 */
+        final boolean ninja;
 
-        Placement(int x, int y, int z, Direction face) {
+        Placement(int x, int y, int z, Direction face, boolean ninja) {
             this.x = x;
             this.y = y;
             this.z = z;
             this.face = face;
+            this.ninja = ninja;
             float[] c = cursorForFace(face);
             this.cursorX = c[0];
             this.cursorY = c[1];
@@ -872,6 +1200,8 @@ public final class PathingGoal implements MovementGoal {
         bridgeTicks = 0;
         bridgeTries = 0;
         bridgeConfirmTicks = 0;
+        bridgeNinja = false;
+        bridgeApproachTicks = 0;
     }
 
     // ------------------------------------------------------------------
@@ -885,6 +1215,7 @@ public final class PathingGoal implements MovementGoal {
             // 路径走完（到边界 / 结束）：清空触发续算（下一 tick 处理）
             path = null;
             resetStuck();
+            resetMovementTracking();
             engine.setInput(PlayerInput.EMPTY);
             return;
         }
@@ -892,10 +1223,106 @@ public final class PathingGoal implements MovementGoal {
         Path.Step step = path.steps().get(index);
         NodePos dest = step.dest;
 
+        // 路径动态重计算：检测 movement 切换，缓存原始代价预估
+        if (currentMovementIndex != index) {
+            currentMovementIndex = index;
+            ticksOnCurrentMovement = 0;
+            // 重新计算当前 movement 的代价（世界可能已变化）
+            MutableMoveResult res = new MutableMoveResult();
+            step.move.apply(world, step.src.x, step.src.y, step.src.z, res);
+            currentMovementOriginalCostEstimate = res.cost;
+        }
+        ticksOnCurrentMovement++;
+
+        // 路径动态重计算：检查前方 movement 的代价是否变为无穷大（世界变化导致不可达）
+        if (checkFutureMovementsImpossible(index)) {
+            log.info("[Running] 世界变化导致前方 movement 不可达，取消路径并重算。");
+            path = null;
+            resetStuck();
+            resetMovementTracking();
+            if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                requestRecompute(px, py, pz, true);
+            }
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 路径动态重计算：检查当前 movement 是否超时或代价激增
+        if (currentMovementOriginalCostEstimate > 0) {
+            if (ticksOnCurrentMovement > currentMovementOriginalCostEstimate + MOVEMENT_TIMEOUT_TICKS) {
+                log.info("[Running] 当前 movement 执行超时（{} tick，预估 {}），取消路径并重算。",
+                        ticksOnCurrentMovement, currentMovementOriginalCostEstimate);
+                path = null;
+                resetStuck();
+                resetMovementTracking();
+                if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                    requestRecompute(px, py, pz, true);
+                }
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+            // 重新计算当前 movement 的实际代价，若激增则判定世界已变
+            MutableMoveResult res = new MutableMoveResult();
+            step.move.apply(world, step.src.x, step.src.y, step.src.z, res);
+            double currentCost = res.cost;
+            if (currentCost - currentMovementOriginalCostEstimate > MAX_COST_INCREASE) {
+                log.info("[Running] 当前 movement 代价激增（{} → {}），取消路径并重算。",
+                        currentMovementOriginalCostEstimate, currentCost);
+                path = null;
+                resetStuck();
+                resetMovementTracking();
+                if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                    requestRecompute(px, py, pz, true);
+                }
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+        }
+
+        // Glide 步：交由专用起滑/巡航/着陆状态机（含烟花自动维持速度），本 tick 消费
+        if (step.move.isGlide()) {
+            followGlide(engine, physics, step, px, py, pz);
+            return;
+        }
+
         // Parkour 步：交由专用多 tick 跟随状态机（助跑→边缘起跳→腾空落地），本 tick 消费
         if (step.move.isParkour()) {
             followParkour(engine, physics, step, px, py, pz);
             return;
+        }
+
+        // Pillar 步：交由专用放置/攀爬逻辑，本 tick 消费
+        if (step.move.isPillar()) {
+            followPillar(engine, physics, step, px, py, pz);
+            return;
+        }
+
+        // Swim 步：交由专用游泳跟随逻辑（浮力控制/呼吸），本 tick 消费
+        if (step.move.isSwim()) {
+            followSwim(engine, physics, step, px, py, pz);
+            return;
+        }
+
+        // Bridge 步：dest 脚下地板尚未铺好时，先用背包方块放置搭桥（铺好后落入下方普通行走）；
+        // 复用 bridgeColumn 的“取物 / 潜行进边 / 瞄准 / 放置 / 等待更新”完整链，与直挖搭桥一致
+        if (step.move.isBridge() && !world.isStandable(dest.x, dest.y - 1, dest.z)) {
+            DigStatus st = bridgeColumn(engine, dest.x, dest.y, dest.z, floor(px), floor(pz));
+            if (st == DigStatus.BUSY) {
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+            if (st == DigStatus.FAILED) {
+                log.info("[Running] 搭桥失败：({}, {}, {}) 无法放置方块，重算。", dest.x, dest.y - 1, dest.z);
+                path = null;
+                resetStuck();
+                resetMovementTracking();
+                if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                    requestRecompute(px, py, pz, true);
+                }
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+            // CLEARED：地板已铺好，落入下方行走逻辑
         }
 
         // 对齐 Baritone “每个 movement 自带 positionsToBreak、运行时自动挖开脚下前方”的挖掘寻路机制：
@@ -904,6 +1331,7 @@ public final class PathingGoal implements MovementGoal {
         // 几何边缘情形），先从整个背包取最优工具把它挖开再前进——这正是“BOT 以为能走过去却被方块卡住”的根因。
         // 仅在显式 BREAK，或允许破块（canBreak）时才挖；否则落入卡住应急挖通 / 重算。
         if (step.move.isBreak() || world.canBreak()) {
+            // 先检查 dest 列（路径目标点）
             DigStatus st = digColumn(engine, dest.x, dest.y, dest.z, px, py, pz);
             if (st == DigStatus.BUSY) {
                 engine.setInput(PlayerInput.EMPTY);
@@ -914,7 +1342,32 @@ public final class PathingGoal implements MovementGoal {
                 engine.setInput(PlayerInput.EMPTY);
                 return;
             }
-            // CLEARED：dest 站立列已畅通，落入下方行走逻辑
+            // CLEARED：dest 站立列已畅通
+            
+            // 再检查当前位置前方（bot 实际移动路径上）是否有阻挡：
+            // 从当前位置朝 dest 方向取前一格，若该列脚/头被可挖方块堵住，先挖开再前进。
+            // 这覆盖“dest 列畅通但当前位置前方有方块/树叶挡住”的情形。
+            int curX = floor(px);
+            int curY = floor(py);
+            int curZ = floor(pz);
+            int dirX = Integer.signum(dest.x - curX);
+            int dirZ = Integer.signum(dest.z - curZ);
+            if (dirX != 0 || dirZ != 0) {
+                int frontX = curX + dirX;
+                int frontZ = curZ + dirZ;
+                // 前方列与 dest 列不同才检查（避免重复挖掘同一列）
+                if (frontX != dest.x || frontZ != dest.z) {
+                    DigStatus frontSt = digColumn(engine, frontX, curY, frontZ, px, py, pz);
+                    if (frontSt == DigStatus.BUSY) {
+                        engine.setInput(PlayerInput.EMPTY);
+                        return;
+                    }
+                    if (frontSt == DigStatus.FAILED) {
+                        // 前方不可挖：不阻塞，继续尝试前进（可能能挤过去或触发卡住检测）
+                    }
+                    // CLEARED 或 FAILED：继续落入下方行走逻辑
+                }
+            }
         }
 
         double targetX = dest.x + 0.5;
@@ -1047,6 +1500,184 @@ public final class PathingGoal implements MovementGoal {
     }
 
     /**
+     * 鞘翅滑翔步跟随（引擎线程，决策架构移植 MS 1.11 飞行子系统）：助跑至 src
+     * 边缘起跳并置程序化起滑请求（{@link PlayerPhysics#requestAirborneGlide}：物理层
+     * 在离地 vy≤0 窗口即时置位起滑并发 START_ELYTRA_FLYING，无需二次跳跃边沿）；
+     * 巡航段每 tick 用 {@link FlightSelector} 对候选航向/俯仰网格做纯物理弹道推演
+     * （目标 = dest 中心，与 A* 同一套方块语义的 {@link PathFlightQuery}），按伤害
+     * 分级 + 目标推进代价选唯一提案执行；无安全候选转 forceLand 损伤最小迫降；
+     * 火箭候选胜出时经 {@link RocketBooster} 走服务器确认链路。着陆由 canGlide
+     * 裁定：落在 dest 邻域则本步完成；偏航/超时清路径异步重算（同 parkour）。
+     */
+    private void followGlide(MovementEngine engine, PlayerPhysics physics, Path.Step step,
+                             double px, double py, double pz) {
+        if (glideStepIndex != index) {
+            glideStepIndex = index;
+            glidePhase = 0;
+            glideLaunchTicks = 0;
+            glideCruiseTicks = 0;
+            glideTicksSinceBoost = GLIDE_BOOST_COOLDOWN_TICKS;
+        }
+
+        NodePos src = step.src;
+        NodePos dest = step.dest;
+        int dirX = Integer.signum(dest.x - src.x);
+        int dirZ = Integer.signum(dest.z - src.z);
+        double targetX = dest.x + 0.5;
+        double targetZ = dest.z + 0.5;
+        float desiredYaw = yawToward(targetX - px, targetZ - pz);
+        float newYaw = stepToward(physics.yaw(), desiredYaw, MAX_YAW_STEP_DEG);
+
+        // 阶段 0：助跑与边缘起跳（抬头 + 预置烟花：选弹/搬迁在助跑与腾空窗口内完成）
+        if (glidePhase == 0) {
+            engine.look(newYaw, GLIDE_LAUNCH_PITCH);
+            if (glideBooster == null && inventory != null && itemRegistry != null) {
+                glideBooster = new RocketBooster(inventory, itemRegistry, rocketFallbackDuration);
+            }
+            if (glideBooster != null) {
+                glideBooster.prepare();
+                glideBooster.tickPrepare(engine);
+            }
+            double prog = (px - (src.x + 0.5)) * dirX + (pz - (src.z + 0.5)) * dirZ;
+            PlayerInput input = new PlayerInput(true, false, false, false, false, false,
+                    world.allowSprint());
+            if (physics.canJump() && prog >= GLIDE_TAKEOFF_PROG) {
+                input = input.withJump(true);
+                physics.requestAirborneGlide();
+                glidePhase = 1;
+                glideLaunchTicks = 0;
+            }
+            glideLaunchTicks++;
+            if (glideLaunchTicks > GLIDE_LAUNCH_TIMEOUT_TICKS) {
+                giveUpGlide(engine, px, py, pz, "助跑/起跳超时");
+                return;
+            }
+            engine.setInput(input);
+            return;
+        }
+
+        // 阶段 1：腾空等待物理层消费起滑请求；检测到起滑的本 tick 立即激活预置
+        // 烟花（START 已于上一 tick 发出，本 tick 是其后最早合法 USE_ITEM 时刻）
+        if (glidePhase == 1) {
+            engine.look(newYaw, GLIDE_LAUNCH_PITCH);
+            if (glideBooster != null) {
+                glideBooster.tickPrepare(engine);
+            }
+            glideLaunchTicks++;
+            if (physics.isFallFlying()) {
+                glidePhase = 2;
+                glideCruiseTicks = 0;
+                log.info("[Running] 寻路滑翔起滑：飞往 ({}, {}, {})。", dest.x, dest.y, dest.z);
+                if (glideBooster != null && glideBooster.prepared() && glideBooster.beginPrepared()) {
+                    glideBooster.tick(engine);
+                    glideTicksSinceBoost = 0;
+                }
+                engine.setInput(PlayerInput.EMPTY);
+                return;
+            }
+            if (glideLaunchTicks > GLIDE_LAUNCH_TIMEOUT_TICKS) {
+                physics.cancelGlideRequest();
+                giveUpGlide(engine, px, py, pz, "起滑超时（鞘翅可能被服务器拒绝）");
+                return;
+            }
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 阶段 2：巡航滑翔
+        engine.setInput(PlayerInput.EMPTY);
+        engine.look(newYaw, glidePitch);
+        glideCruiseTicks++;
+        glideTicksSinceBoost++;
+
+        if (!physics.isFallFlying()) {
+            // 自然着陆（触地/入水/服务器纠正）：落在 dest 邻域即本步完成
+            double dDest = Math.hypot(targetX - px, targetZ - pz);
+            if (dDest < arriveRadius + GLIDE_LAND_TOLERANCE
+                    && Math.abs(py - dest.y) < GLIDE_LAND_Y_TOLERANCE) {
+                glidePhase = 0;
+                index++;
+                resetStuck();
+                markProgress();
+                log.info("[Running] 滑翔着陆成功（{} tick），继续后续路径。", glideCruiseTicks);
+            } else {
+                giveUpGlide(engine, px, py, pz, String.format("落点偏离目标 %.1f 格", dDest));
+            }
+            return;
+        }
+        double timeout = (currentMovementOriginalCostEstimate > 0
+                ? currentMovementOriginalCostEstimate * 2 : 600)
+                + GLIDE_CRUISE_TIMEOUT_MARGIN_TICKS;
+        if (glideCruiseTicks > timeout) {
+            giveUpGlide(engine, px, py, pz, "巡航超时");
+            return;
+        }
+
+        // 推进在途补弹点击链（服务器异步确认）；booster 已在阶段 0 懒建；
+        // 预置就绪但未在起滑 tick 发射的补漏 → 补发令立即发射
+        if (glideBooster == null && inventory != null && itemRegistry != null) {
+            glideBooster = new RocketBooster(inventory, itemRegistry, rocketFallbackDuration);
+        }
+        if (glideBooster != null && glideBooster.isBusy()) {
+            if (glideBooster.prepared() && glideBooster.beginPrepared()) {
+                glideTicksSinceBoost = 0;
+            }
+            glideBooster.tick(engine);
+        }
+
+        // 每 tick 候选网格决策（目标 = dest 中心；与 A* 同一套方块语义的推演查询）
+        if (glideQuery == null) {
+            glideQuery = new PathFlightQuery(world);
+        }
+        int rocketsHeld = inventory == null || itemRegistry == null ? 0
+                : inventory.countItem(itemRegistry, RocketBooster.ROCKET_ITEM_NAME);
+        boolean rocketReady = glideBooster != null && !glideBooster.isBusy()
+                && physics.rocketBoostRemaining() <= 0
+                && glideTicksSinceBoost >= GLIDE_BOOST_COOLDOWN_TICKS
+                && rocketsHeld > 0;
+        FlightContext ctx = new FlightContext(glideQuery,
+                px, py, pz,
+                physics.deltaX(), physics.deltaY(), physics.deltaZ(),
+                physics.fallDistance(),
+                physics.yaw(), physics.pitch(),
+                targetX, dest.y, targetZ,
+                arriveRadius + GLIDE_LAND_TOLERANCE,
+                rocketReady ? rocketsHeld : 0,
+                physics.rocketBoostRemaining() > 0,
+                20.0, // 无自身血量镜像：满血阈值（岩浆/致命坠伤已在 outcome 单独判）
+                false,
+                glideQuery.minY());
+        FlightSelector.Decision decision = glideSelector.decide(ctx);
+        if (decision == null) {
+            decision = glideSelector.forceLand(ctx); // 无安全候选→损伤最小迫降
+        }
+        engine.look(stepToward(physics.yaw(), decision.action().yaw(), MAX_YAW_STEP_DEG),
+                stepToward(physics.pitch(), decision.action().pitch(), MAX_YAW_STEP_DEG));
+        if (decision.action().firework() && glideBooster != null && rocketReady) {
+            if (glideBooster.begin()) {
+                glideBooster.tick(engine);
+                glideTicksSinceBoost = 0;
+            }
+        }
+    }
+
+    /** 放弃当前滑翔步：清路径并异步重算（同 parkour 失败处理）。 */
+    private void giveUpGlide(MovementEngine engine, double px, double py, double pz, String reason) {
+        glidePhase = 0;
+        if (glideBooster != null) {
+            glideBooster.cancel();
+        }
+        engine.physics().cancelGlideRequest();
+        log.info("[Running] 滑翔步失败（{}），重算路径。", reason);
+        path = null;
+        resetStuck();
+        if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+            requestRecompute(px, py, pz, true);
+        }
+        engine.setInput(PlayerInput.EMPTY);
+    }
+
+    /**
      * 推进当前航点：进入到达半径即前进；若到下一航点更近（越过当前中心）则跳过，减少绕点/画圈。
      */
     private void advancePastNodes(double px, double py, double pz) {
@@ -1065,8 +1696,9 @@ public final class PathingGoal implements MovementGoal {
                 continue;
             }
             // 越过：已在本层且离下一航点更近 → 跳过当前（快速移动/斜走时避免绕点）；
-            // 但 parkour 航点必须实际起跳越过，不得被提前跳过
-            if (arrivedY && !steps.get(index).move.isParkour() && index + 1 < steps.size()) {
+            // 但 parkour / glide 航点必须实际起跳/起滑执行，不得被提前跳过
+            if (arrivedY && !steps.get(index).move.isParkour() && !steps.get(index).move.isGlide()
+                    && index + 1 < steps.size()) {
                 NodePos nxt = steps.get(index + 1).dest;
                 double dNext = Math.hypot(nxt.x + 0.5 - px, nxt.z + 0.5 - pz);
                 if (dNext < dCur) {
@@ -1117,8 +1749,9 @@ public final class PathingGoal implements MovementGoal {
      * 选出破坏耗时最短的工具；若该工具当前位于主背包，先经 {@link InventoryMoveGoal} 换到某个
      * 快捷栏槽，再手持并逐 tick 驱动 {@link BlockActionGoal} 挖掘，直到本格破坏。
      *
-     * <p>安全性：{@code requiredTicks} 取规划最优工具的耗时估计并留正裕量——服务器按“实际手持
-     * + 硬度”自主计时，按住时长只可能偏慢不可能偏快，故绝不触发 fastbreak。取工具若未及时生效，
+     * <p>安全性：每 tick 破坏进度按规划最优工具的原版公式换算，换持该工具后逐 tick
+     * 累加，进度满（{@code >= 1.0}）即发 FINISH——与服务端自主推进的裂纹同步，既不会
+     * 触发 fastbreak，也不会在裂纹已满后多按数秒才破块。取工具若未及时生效，
      * 也只是“慢一点 → 到预算后放弃”，不会造成越界行为。</p>
      *
      * @return 本 tick 状态：{@link DigStatus#CLEARED} 该列已畅通可前进；{@link DigStatus#BUSY}
@@ -1156,10 +1789,16 @@ public final class PathingGoal implements MovementGoal {
             digTargetX = bx;
             digTargetY = by;
             digTargetZ = bz;
-            digFace = faceTowardPlayer(bx, by, bz, px, py, pz);
-            digRequiredTicks = (int) Math.ceil(plan.ticks()) + 2; // 正裕量：只可能偏慢，绝不 fastbreak
+            digFace = visibleDigFace(bx, by, bz, px, py, pz);
+            // 对齐原版：把最优工具的预估 tick 换算为每 tick 进度，BlockActionGoal 累加到满即发 FINISH
+            digPerTickProgress = 1.0 / Math.max(1.0, plan.ticks());
             digEquipSlot = plan.equipHotbarSlot();
             mineTicks = 0;
+            // 撤销在途挖掘（若已 START 未 FINISH 则发 CANCEL_DIGGING），避免切换手持时服务器
+            // 仍认为在挖旧方块而触发 Bad Packets（Type G，Invalid HeldItemSlot）
+            if (activeMine != null) {
+                activeMine.onFinish(engine, false);
+            }
             activeMine = null;
             activeRelocate = null;
             if (plan.needsRelocate() && inventory != null) {
@@ -1215,7 +1854,7 @@ public final class PathingGoal implements MovementGoal {
     /** 依据当前挖掘上下文创建一个 {@link BlockActionGoal} 挖块子目标。 */
     private void startDigGoal() {
         activeMine = BlockActionGoal.dig(
-                Vector3i.from(digTargetX, digTargetY, digTargetZ), digFace, digRequiredTicks);
+                Vector3i.from(digTargetX, digTargetY, digTargetZ), digFace, digPerTickProgress);
     }
 
     /** 撤下在途挖 / 取子目标并复位目标编码（不触碰寻路状态）。 */
@@ -1327,6 +1966,42 @@ public final class PathingGoal implements MovementGoal {
         return dy > 0 ? Direction.UP : Direction.DOWN;
     }
 
+    /**
+     * 选择挖掘的命中面：优先“朝向玩家”的面；若该面外侧被方块阻挡（视线不可达，服务器会
+     * 拒绝挖掘），则依次尝试上/下/四侧，返回第一个外侧暴露（可通行）的面；全部被挡时仍
+     * 返回主面（交由挖掘失败兜底）。避免向被阻挡的面发送无效挖掘包。
+     */
+    private Direction visibleDigFace(int bx, int by, int bz, double px, double py, double pz) {
+        Direction primary = faceTowardPlayer(bx, by, bz, px, py, pz);
+        if (digFaceExposed(bx, by, bz, primary)) {
+            return primary;
+        }
+        Direction[] fallbacks = {Direction.UP, Direction.DOWN, Direction.NORTH, Direction.SOUTH,
+                Direction.WEST, Direction.EAST};
+        for (Direction d : fallbacks) {
+            if (digFaceExposed(bx, by, bz, d)) {
+                return d;
+            }
+        }
+        return primary;
+    }
+
+    /** 该面外侧相邻格是否可通行（即该面暴露、视线可命中）。 */
+    private boolean digFaceExposed(int bx, int by, int bz, Direction face) {
+        int ox = bx;
+        int oy = by;
+        int oz = bz;
+        switch (face) {
+            case NORTH -> oz--;
+            case SOUTH -> oz++;
+            case WEST -> ox--;
+            case EAST -> ox++;
+            case UP -> oy++;
+            case DOWN -> oy--;
+        }
+        return world.isPassable(ox, oy, oz);
+    }
+
     /** 方块坐标 → 唯一 long 键（对齐原版 BlockPos.asLong 的分位打包）。 */
     private static long blockKey(int x, int y, int z) {
         return (((long) x) << 42) ^ (((long) z) << 21) ^ ((long) y);
@@ -1417,5 +2092,306 @@ public final class PathingGoal implements MovementGoal {
     /** 路径总步数（尚无路径时为 0）。 */
     public int totalSteps() {
         return path != null ? path.length() : 0;
+    }
+
+    /**
+     * 检查前方 movement 是否因世界变化而变为不可达（代价无穷大）。
+     * 对齐 Baritone {@code PathExecutor} 的 costVerificationLookahead 机制。
+     */
+    private boolean checkFutureMovementsImpossible(int currentIndex) {
+        if (path == null) {
+            return false;
+        }
+        int limit = Math.min(currentIndex + COST_VERIFICATION_LOOKAHEAD, path.length());
+        for (int i = currentIndex; i < limit; i++) {
+            Path.Step step = path.steps().get(i);
+            MutableMoveResult res = new MutableMoveResult();
+            step.move.apply(world, step.src.x, step.src.y, step.src.z, res);
+            if (res.cost >= MoveCosts.COST_INF) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Pillar 原地向上跟随（引擎线程）：对齐 Baritone {@code MovementPillar.updateState}。
+     * 若脚下是可攀爬方块（梯子/藤蔓），则直接向上爬；否则需要放置方块垫脚。
+     */
+    private void followPillar(MovementEngine engine, PlayerPhysics physics, Path.Step step,
+                              double px, double py, double pz) {
+        NodePos src = step.src;
+        NodePos dest = step.dest;
+
+        // 若已到达 dest 高度，本步完成；清除在途搭桥状态，避免下一步 PILLAR 复用旧坐标
+        if (floor(py) >= dest.y) {
+            clearBridge(engine);
+            index++;
+            resetStuck();
+            markProgress();
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 若脚下是可攀爬方块（梯子/藤蔓），则直接向上爬
+        if (world.isClimbable(floor(px), floor(py) - 1, floor(pz))) {
+            // 朝向 dest 中心，按住前进 + 跳跃
+            float desiredYaw = yawToward(dest.x + 0.5 - px, dest.z + 0.5 - pz);
+            float newYaw = stepToward(physics.yaw(), desiredYaw, MAX_YAW_STEP_DEG);
+            engine.look(newYaw, physics.pitch());
+            PlayerInput input = new PlayerInput(true, false, false, false, true, false, false);
+            engine.setInput(input);
+            return;
+        }
+
+        // 否则需要放置方块垫脚：先检查脚下是否可站立
+        if (!world.isStandable(floor(px), floor(py) - 1, floor(pz))) {
+            // 脚下不可站立（可能是空气）：无法垫脚，放弃本路径
+            log.info("[Running] Pillar 失败：脚下不可站立，无法垫脚。");
+            path = null;
+            resetStuck();
+            resetMovementTracking();
+            if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                requestRecompute(px, py, pz, true);
+            }
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 放置方块垫脚：使用搭桥逻辑在脚下放置方块
+        // 先检查是否已有在途的搭桥目标
+        if (bridgeTargetKey == UNSET_KEY) {
+            // 新缺口：在脚下放置方块
+            DigStatus bridge = bridgeColumn(engine, floor(px), floor(py), floor(pz), floor(px), floor(pz));
+            if (bridge != DigStatus.CLEARED) {
+                if (bridge == DigStatus.FAILED) {
+                    log.info("[Running] Pillar 失败：无法放置方块垫脚。");
+                    path = null;
+                    resetStuck();
+                    resetMovementTracking();
+                    if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                        requestRecompute(px, py, pz, true);
+                    }
+                    engine.setInput(PlayerInput.EMPTY);
+                }
+                return;
+            }
+        } else {
+            // 继续之前的搭桥目标
+            DigStatus bridge = bridgeColumn(engine, bridgeColX, bridgeFootY, bridgeColZ, floor(px), floor(pz));
+            if (bridge != DigStatus.CLEARED) {
+                if (bridge == DigStatus.FAILED) {
+                    log.info("[Running] Pillar 失败：搭桥超时或失败。");
+                    path = null;
+                    resetStuck();
+                    resetMovementTracking();
+                    if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                        requestRecompute(px, py, pz, true);
+                    }
+                    engine.setInput(PlayerInput.EMPTY);
+                }
+                return;
+            }
+        }
+
+        // 搭桥完成后，向上跳跃
+        float desiredYaw = yawToward(dest.x + 0.5 - px, dest.z + 0.5 - pz);
+        float newYaw = stepToward(physics.yaw(), desiredYaw, MAX_YAW_STEP_DEG);
+        engine.look(newYaw, physics.pitch());
+        PlayerInput input = new PlayerInput(true, false, false, false, true, false, false);
+        engine.setInput(input);
+    }
+
+    /**
+     * 游泳跟随（引擎线程）：对齐 MC 原版 {@code LivingEntity.travelInWater} 与
+     * {@code LocalPlayer.aiStep} 的水中行为。平游时按住前进；上浮时按住前进+跳跃；
+     * 下沉时按住前进+潜行（触发 goDownInWater）。到达 dest 邻域即完成本步。
+     *
+     * <p>若当前位置不在水中（如意外走出水面），自动切换回普通行走逻辑，
+     * 避免“在水中却用陆地移动”或“在陆地却用游泳移动”的错位。</p>
+     */
+    private void followSwim(MovementEngine engine, PlayerPhysics physics, Path.Step step,
+                            double px, double py, double pz) {
+        NodePos dest = step.dest;
+        double targetX = dest.x + 0.5;
+        double targetZ = dest.z + 0.5;
+        double dx = targetX - px;
+        double dz = targetZ - pz;
+        double horizontalDist = Math.hypot(dx, dz);
+        double dy = dest.y - py;
+
+        // 到达判定：水平接近且 Y 对齐
+        if (horizontalDist < arriveRadius + 0.3 && Math.abs(dy) < ARRIVE_Y_TOLERANCE) {
+            index++;
+            resetStuck();
+            markProgress();
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 当前位置不在水中（如意外走出水面）：本步视为完成，交回普通行走逻辑
+        if (!world.isWater(floor(px), floor(py), floor(pz))) {
+            index++;
+            resetStuck();
+            markProgress();
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 朝向限速逼近目标
+        float desiredYaw = yawToward(dx, dz);
+        float newYaw = stepToward(physics.yaw(), desiredYaw, MAX_YAW_STEP_DEG);
+        engine.look(newYaw, physics.pitch());
+
+        // 输入：前进 + 冲刺（水中冲刺是进入游泳姿势的前提，对齐 Entity.updateSwimming）；
+        // 上浮按跳跃，下沉按潜行
+        PlayerInput input = new PlayerInput(true, false, false, false, false, false, true);
+        if (dy > 0.3) {
+            // 需要上浮：按住跳跃（jumpInLiquid 上浮 0.04/tick）
+            input = input.withJump(true);
+        } else if (dy < -0.3) {
+            // 需要下沉：按住潜行（goDownInWater 下沉 0.04/tick）
+            input = input.withShift(true);
+        }
+        engine.setInput(input);
+
+        // 卡住检测：水中被方块挡住时，尝试挖开（若允许破块）
+        updateStuck(px, pz, physics.onGround());
+        if (stuckTicks >= STUCK_TICKS) {
+            resetStuck();
+            stuckEscalations++;
+            boolean escalated = stuckDigEnabled && world.canBreak()
+                    && stuckEscalations <= MAX_STUCK_ESCALATIONS
+                    && beginEmergencyDig(dest, px, py, pz);
+            if (!escalated) {
+                path = null;
+                if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                    requestRecompute(px, py, pz, true);
+                }
+            }
+        }
+    }
+
+    /**
+     * 落水上岸模式（引擎线程）：BOT 在水中且无可用路径时的兜底移动。
+     *
+     * <p>按配置 {@code pathfinding.water-priority} 分两种策略：</p>
+     * <ol>
+     *   <li>游泳优先（swim，默认）：朝目标方向直接游过去（复用目标锚点列），不主动找岸边；</li>
+     *   <li>上岸优先（shore）：先搜索最近的可站立岸边，朝岸边游。</li>
+     * </ol>
+     *
+     * <p>两种模式下，头顶被水淹没时都会按住跳跃上浮到水面；200 tick 仍未出水则交回常规寻路。</p>
+     */
+    private void tickWaterEscape(MovementEngine engine, PlayerPhysics physics,
+                                 double px, double py, double pz) {
+        waterEscapeTicks++;
+        int curX = floor(px);
+        int curY = floor(py);
+        int curZ = floor(pz);
+
+        // 已出水：退出水中兜底模式，重新寻路
+        if (!world.isWater(curX, curY, curZ)) {
+            waterEscape = false;
+            log.info("[Running] BOT 已出水，重新寻路。");
+            path = null;
+            resetStuck();
+            if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                requestRecompute(px, py, pz, true);
+            }
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 超时（10 秒）：交回常规寻路（由空闲分支再算）
+        if (waterEscapeTicks > 200) {
+            waterEscape = false;
+            log.info("[Running] 水中行进超时，交回常规寻路。");
+            path = null;
+            resetStuck();
+            if (!computing.get() && totalReplans < MAX_TOTAL_REPLANS) {
+                requestRecompute(px, py, pz, true);
+            }
+            engine.setInput(PlayerInput.EMPTY);
+            return;
+        }
+
+        // 头顶仍被水淹没：需要先上浮到水面，才能看到/登上岸边
+        boolean submerged = world.isWater(curX, curY + 1, curZ);
+
+        // 决定游向目标：游泳优先时朝目标锚点游，上岸优先（或无法解析目标）时找最近岸边
+        double targetX = Double.NaN;
+        double targetZ = Double.NaN;
+        if (waterSwimPriority) {
+            int[] anchor = tunnelAnchor();
+            if (anchor != null) {
+                targetX = anchor[0] + 0.5;
+                targetZ = anchor[1] + 0.5;
+            }
+        }
+        if (Double.isNaN(targetX)) {
+            int[] shore = findNearestShore(curX, curY, curZ);
+            if (shore != null) {
+                targetX = shore[0] + 0.5;
+                targetZ = shore[1] + 0.5;
+            }
+        }
+
+        if (!Double.isNaN(targetX)) {
+            double dist = Math.hypot(targetX - px, targetZ - pz);
+            float desiredYaw = yawToward(targetX - px, targetZ - pz);
+            float newYaw = stepToward(physics.yaw(), desiredYaw, MAX_YAW_STEP_DEG);
+            engine.look(newYaw, physics.pitch());
+            // 朝目标前进（按住冲刺进入游泳姿势）；被水淹没或已贴近目标时按住跳跃（上浮 / 登岸）
+            PlayerInput input = new PlayerInput(true, false, false, false, false, false, true);
+            if (submerged || dist < 1.0) {
+                input = input.withJump(true);
+            }
+            engine.setInput(input);
+            return;
+        }
+
+        // 无目标可游（如跟随目标从未出现且无岸边）：原地保持漂浮（被水淹没则上浮）
+        if (submerged) {
+            engine.setInput(new PlayerInput(false, false, false, false, true, false, false));
+        } else {
+            engine.setInput(PlayerInput.EMPTY);
+        }
+    }
+
+    /**
+     * 在水中寻找最近的可站立岸边：以 (cx,cz) 为中心按同心环由近及远搜索，
+     * 半径最多 {@link #WATER_ESCAPE_SHORE_RADIUS} 格；找不到返回 {@code null}。
+     * 同时检查当前层与上一层（岸边可能高出水面 1 格，需先上浮再登岸）。
+     */
+    private int[] findNearestShore(int cx, int cy, int cz) {
+        for (int r = 1; r <= WATER_ESCAPE_SHORE_RADIUS; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) {
+                        continue; // 只搜索当前环，逐环由近及远
+                    }
+                    int x = cx + dx;
+                    int z = cz + dz;
+                    if (isShore(x, cy, z) || isShore(x, cy + 1, z)) {
+                        return new int[]{x, z};
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 该格（脚部在 {@code y}）是否为可登上的岸边：脚格非水、脚下可站立、脚+头可通行。 */
+    private boolean isShore(int x, int y, int z) {
+        return world.isLoadedAndStandable(x, y - 1, z)
+                && !world.isWater(x, y, z)
+                && world.isLoadedAndPassable(x, y, z)
+                && world.isLoadedAndPassable(x, y + 1, z);
+    }
+
+    /** 该格是否在水中（含水流/水源）。 */
+    private boolean isInWater(int x, int y, int z) {
+        return world.isWater(x, y, z);
     }
 }
